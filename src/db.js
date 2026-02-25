@@ -126,8 +126,6 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
   CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
   CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user ON refresh_tokens(user_id);
-  CREATE INDEX IF NOT EXISTS idx_user_plans_plan ON user_plans(plan_id);
-  CREATE INDEX IF NOT EXISTS idx_offers_provider ON offers(provider_id);
 
   CREATE TABLE IF NOT EXISTS plans (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -179,6 +177,8 @@ db.exec(`
   );
 
   CREATE INDEX IF NOT EXISTS idx_offers_active ON offers(active, valid_until);
+  CREATE INDEX IF NOT EXISTS idx_user_plans_plan ON user_plans(plan_id);
+  CREATE INDEX IF NOT EXISTS idx_offers_provider ON offers(provider_id);
 `);
 
 // Migrations: add columns that may be missing in older databases
