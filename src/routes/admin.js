@@ -16,18 +16,26 @@ export default async function adminRoutes(fastify) {
 
   // ─── Dashboard Stats ────────────────────────────────────────
   fastify.get('/stats', { preHandler: [adminOnly] }, async () => {
-    const totalUsers = db.prepare('SELECT COUNT(*) as count FROM users').get().count;
-    const totalCustomers = db.prepare("SELECT COUNT(*) as count FROM users WHERE role = 'customer'").get().count;
-    const totalProviders = db.prepare("SELECT COUNT(*) as count FROM users WHERE role = 'provider'").get().count;
-    const totalOrders = db.prepare('SELECT COUNT(*) as count FROM orders').get().count;
+    const userStats = db.prepare(`
+      SELECT
+        COUNT(*) as totalUsers,
+        SUM(CASE WHEN role = 'customer' THEN 1 ELSE 0 END) as totalCustomers,
+        SUM(CASE WHEN role = 'provider' THEN 1 ELSE 0 END) as totalProviders
+      FROM users
+    `).get();
+
+    const orderStats = db.prepare(`
+      SELECT
+        COUNT(*) as totalOrders,
+        COALESCE(SUM(total), 0) as totalRevenue,
+        COALESCE(SUM(platform_fee), 0) as totalPlatformFees,
+        SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pendingOrders,
+        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completedOrders,
+        SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) as cancelledOrders
+      FROM orders
+    `).get();
+
     const totalServices = db.prepare('SELECT COUNT(*) as count FROM services').get().count;
-
-    const totalRevenue = db.prepare('SELECT COALESCE(SUM(total), 0) as sum FROM orders').get().sum;
-    const totalPlatformFees = db.prepare('SELECT COALESCE(SUM(platform_fee), 0) as sum FROM orders').get().sum;
-
-    const pendingOrders = db.prepare("SELECT COUNT(*) as count FROM orders WHERE status = 'pending'").get().count;
-    const completedOrders = db.prepare("SELECT COUNT(*) as count FROM orders WHERE status = 'completed'").get().count;
-    const cancelledOrders = db.prepare("SELECT COUNT(*) as count FROM orders WHERE status = 'cancelled'").get().count;
 
     const recentOrders = db.prepare(`
       SELECT o.*, u.name as customer_name, u.email as customer_email
@@ -42,16 +50,9 @@ export default async function adminRoutes(fastify) {
     `).all();
 
     return {
-      totalUsers,
-      totalCustomers,
-      totalProviders,
-      totalOrders,
+      ...userStats,
+      ...orderStats,
       totalServices,
-      totalRevenue,
-      totalPlatformFees,
-      pendingOrders,
-      completedOrders,
-      cancelledOrders,
       recentOrders,
       recentUsers,
     };
@@ -141,14 +142,24 @@ export default async function adminRoutes(fastify) {
       LIMIT ? OFFSET ?
     `).all(...params, Number(limit), Number(offset));
 
-    // Enrich with order count and total spent
-    const enriched = users.map((u) => {
+    // Enrich with order count and total spent (single query instead of N+1)
+    if (users.length > 0) {
+      const placeholders = users.map(() => '?').join(',');
+      const userIds = users.map(u => u.id);
       const orderStats = db.prepare(`
-        SELECT COUNT(*) as order_count, COALESCE(SUM(total), 0) as total_spent
-        FROM orders WHERE customer_id = ?
-      `).get(u.id);
-      return { ...u, order_count: orderStats.order_count, total_spent: orderStats.total_spent };
-    });
+        SELECT customer_id, COUNT(*) as order_count, COALESCE(SUM(total), 0) as total_spent
+        FROM orders WHERE customer_id IN (${placeholders})
+        GROUP BY customer_id
+      `).all(...userIds);
+      const statsMap = Object.fromEntries(orderStats.map(s => [s.customer_id, s]));
+      var enriched = users.map(u => ({
+        ...u,
+        order_count: statsMap[u.id]?.order_count || 0,
+        total_spent: statsMap[u.id]?.total_spent || 0,
+      }));
+    } else {
+      var enriched = [];
+    }
 
     return { users: enriched, total, page: Number(page), totalPages: Math.ceil(total / Number(limit)) };
   });
@@ -222,8 +233,27 @@ export default async function adminRoutes(fastify) {
     if (!user) return reply.status(404).send({ message: 'User not found' });
     if (user.role === 'admin') return reply.status(400).send({ message: 'Cannot delete admin users' });
 
-    db.prepare('DELETE FROM refresh_tokens WHERE user_id = ?').run(request.params.id);
-    db.prepare('DELETE FROM users WHERE id = ?').run(request.params.id);
+    const deleteUser = db.transaction((userId) => {
+      // Delete order_items and payments for user's orders (as customer)
+      const orderIds = db.prepare('SELECT id FROM orders WHERE customer_id = ?').all(userId).map(o => o.id);
+      for (const orderId of orderIds) {
+        db.prepare('DELETE FROM order_items WHERE order_id = ?').run(orderId);
+        db.prepare('DELETE FROM payments WHERE order_id = ?').run(orderId);
+      }
+      db.prepare('DELETE FROM orders WHERE customer_id = ?').run(userId);
+
+      // Nullify provider references instead of deleting
+      db.prepare('UPDATE orders SET provider_id = NULL WHERE provider_id = ?').run(userId);
+      db.prepare('UPDATE services SET provider_id = NULL WHERE provider_id = ?').run(userId);
+      db.prepare('UPDATE offers SET provider_id = NULL WHERE provider_id = ?').run(userId);
+
+      // Clean up user-specific records
+      db.prepare('DELETE FROM user_plans WHERE user_id = ?').run(userId);
+      db.prepare('DELETE FROM refresh_tokens WHERE user_id = ?').run(userId);
+      db.prepare('DELETE FROM users WHERE id = ?').run(userId);
+    });
+
+    deleteUser(request.params.id);
     return { message: 'User deleted successfully' };
   });
 
@@ -496,11 +526,10 @@ export default async function adminRoutes(fastify) {
       features: p.features ? JSON.parse(p.features) : [],
     }));
 
-    // Subscriber counts
-    const enriched = parsed.map((p) => {
-      const subs = db.prepare("SELECT COUNT(*) as count FROM user_plans WHERE plan_id = ? AND status = 'active'").get(p.id);
-      return { ...p, subscriber_count: subs.count };
-    });
+    // Subscriber counts (single query instead of N+1)
+    const subCounts = db.prepare("SELECT plan_id, COUNT(*) as count FROM user_plans WHERE status = 'active' GROUP BY plan_id").all();
+    const subMap = Object.fromEntries(subCounts.map(s => [s.plan_id, s.count]));
+    const enriched = parsed.map(p => ({ ...p, subscriber_count: subMap[p.id] || 0 }));
 
     return { plans: enriched };
   });

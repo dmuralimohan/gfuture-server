@@ -7,6 +7,7 @@ const db = new Database(join(__dirname, '..', 'gfuture.db'));
 
 // Enable WAL mode for better performance
 db.pragma('journal_mode = WAL');
+db.pragma('foreign_keys = ON');
 
 // Create tables
 db.exec(`
@@ -113,6 +114,20 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_otp_phone ON otp_verifications(phone, expires_at);
   CREATE INDEX IF NOT EXISTS idx_payment_order ON payments(order_id);
+  CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id);
+  CREATE INDEX IF NOT EXISTS idx_orders_provider ON orders(provider_id);
+  CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
+  CREATE INDEX IF NOT EXISTS idx_orders_created ON orders(created_at);
+  CREATE INDEX IF NOT EXISTS idx_services_category ON services(category_id);
+  CREATE INDEX IF NOT EXISTS idx_services_provider ON services(provider_id);
+  CREATE INDEX IF NOT EXISTS idx_services_active ON services(active);
+  CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items(order_id);
+  CREATE INDEX IF NOT EXISTS idx_order_items_service ON order_items(service_id);
+  CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
+  CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+  CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user ON refresh_tokens(user_id);
+  CREATE INDEX IF NOT EXISTS idx_user_plans_plan ON user_plans(plan_id);
+  CREATE INDEX IF NOT EXISTS idx_offers_provider ON offers(provider_id);
 
   CREATE TABLE IF NOT EXISTS plans (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
