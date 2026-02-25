@@ -184,6 +184,8 @@ db.exec(`
 // Migrations: add columns that may be missing in older databases
 const migrations = [
   { table: 'users', column: 'profile_picture', type: 'TEXT' },
+  { table: 'orders', column: 'discount_amount', type: 'REAL DEFAULT 0' },
+  { table: 'orders', column: 'coupon_code', type: 'TEXT' },
 ];
 
 for (const { table, column, type } of migrations) {
