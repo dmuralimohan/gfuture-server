@@ -27,7 +27,7 @@ await app.register(cors, {
 
 await app.register(jwt, {
   secret: process.env.JWT_SECRET || 'gfuture-super-secret-key-2026',
-  sign: { expiresIn: '5m' }, // Access token = 5 minutes
+  sign: { expiresIn: '30m' }, // Access token = 30 minutes
 });
 
 // Decorators
