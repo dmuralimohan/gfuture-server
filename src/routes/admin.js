@@ -545,7 +545,7 @@ export default async function adminRoutes(fastify) {
     const result = db.prepare(`
       INSERT INTO plans (name, price, description, target, features, recommended, cta, sort_order, active)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(name, price, description, target || 'both', JSON.stringify(features || []), recommended ? 1 : 0, cta || 'Choose Plan', sort_order ?? maxSort, active !== undefined ? (active ? 1 : 0) : 1);
+    `).run(name, price, description, target || 'both', JSON.stringify(features || []), recommended ? 1 : 0, cta || 'Choose Plan', sort_order || maxSort, active !== undefined ? (active ? 1 : 0) : 1);
 
     const plan = db.prepare('SELECT * FROM plans WHERE id = ?').get(result.lastInsertRowid);
     plan.features = plan.features ? JSON.parse(plan.features) : [];
