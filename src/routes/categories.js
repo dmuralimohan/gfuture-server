@@ -2,8 +2,9 @@ import db from '../db.js';
 
 export default async function categoryRoutes(fastify) {
   // GET /api/categories — list all (public)
-  fastify.get('/', async () => {
+  fastify.get('/', async (request, reply) => {
     const categories = db.prepare('SELECT * FROM categories ORDER BY id').all();
+    reply.header('Cache-Control', 'public, max-age=120, stale-while-revalidate=300');
     return { categories };
   });
 

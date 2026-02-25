@@ -1,6 +1,10 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import jwt from '@fastify/jwt';
+import fastifyStatic from '@fastify/static';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
+import { existsSync } from 'fs';
 import authRoutes from './routes/auth.js';
 import serviceRoutes from './routes/services.js';
 import orderRoutes from './routes/orders.js';
@@ -11,6 +15,7 @@ import adminRoutes from './routes/admin.js';
 import planRoutes from './routes/plans.js';
 import offerRoutes from './routes/offers.js';
 
+const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = Fastify({ logger: true });
 
 // CORS — allowed origins from env or defaults
@@ -52,6 +57,27 @@ app.register(offerRoutes, { prefix: '/api/offers' });
 
 // Health check
 app.get('/api/health', async () => ({ status: 'ok', timestamp: new Date().toISOString() }));
+
+// ─── Serve Client Build (static SPA) ─────────────────────────
+const clientDistPath = join(__dirname, '..', '..', 'client', 'dist');
+if (existsSync(clientDistPath)) {
+  // Serve static assets (JS, CSS, images, etc.)
+  await app.register(fastifyStatic, {
+    root: clientDistPath,
+    prefix: '/',
+    wildcard: false,
+  });
+
+  // SPA fallback — all non-API routes serve index.html
+  app.setNotFoundHandler((request, reply) => {
+    if (request.url.startsWith('/api/')) {
+      return reply.status(404).send({ message: 'API route not found' });
+    }
+    return reply.sendFile('index.html');
+  });
+} else {
+  app.log.warn('Client dist not found at ' + clientDistPath + '. Run "npm run build" in client/ first.');
+}
 
 // Start
 const PORT = process.env.PORT || 3001;

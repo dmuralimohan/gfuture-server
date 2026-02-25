@@ -2,7 +2,7 @@ import db from '../db.js';
 
 export default async function planRoutes(fastify) {
     // ─── Public: GET /api/plans — list all active plans ─────────
-    fastify.get('/', async (request) => {
+    fastify.get('/', async (request, reply) => {
         const { target } = request.query; // 'customer', 'provider', or omit for all
         let where = 'WHERE active = 1';
         const params = [];
@@ -16,6 +16,7 @@ export default async function planRoutes(fastify) {
             .prepare(`SELECT * FROM plans ${where} ORDER BY sort_order ASC`)
             .all(...params);
 
+        reply.header('Cache-Control', 'public, max-age=60, stale-while-revalidate=120');
         return {
             plans: plans.map((p) => ({
                 ...p,
@@ -28,7 +29,8 @@ export default async function planRoutes(fastify) {
     fastify.get('/my', { preHandler: [fastify.authenticate] }, async (request) => {
         const row = db
             .prepare(
-                `SELECT up.*, p.name as plan_name, p.price, p.currency, p.description, p.features, p.recommended
+                `SELECT p.id, p.name, p.price, p.currency, p.description, p.features, p.recommended, p.target, p.cta, p.sort_order,
+                        up.status as subscription_status, up.subscribed_at, up.expires_at
          FROM user_plans up
          JOIN plans p ON up.plan_id = p.id
          WHERE up.user_id = ? AND up.status = 'active'
@@ -68,7 +70,8 @@ export default async function planRoutes(fastify) {
 
         const subscription = db
             .prepare(
-                `SELECT up.*, p.name as plan_name, p.price, p.currency, p.description, p.features
+                `SELECT p.id, p.name, p.price, p.currency, p.description, p.features,
+                        up.status as subscription_status, up.subscribed_at, up.expires_at
          FROM user_plans up
          JOIN plans p ON up.plan_id = p.id
          WHERE up.id = ?`
@@ -116,10 +119,10 @@ export default async function planRoutes(fastify) {
                 .get(target);
         }
 
-        if (!plan) return { recommendation: null };
+        if (!plan) return { plan: null };
 
         return {
-            recommendation: {
+            plan: {
                 ...plan,
                 features: plan.features ? JSON.parse(plan.features) : [],
             },

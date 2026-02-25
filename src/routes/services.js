@@ -2,7 +2,7 @@ import db from '../db.js';
 
 export default async function serviceRoutes(fastify) {
   // GET /api/services — list all services (public)
-  fastify.get('/', async (request) => {
+  fastify.get('/', async (request, reply) => {
     const { category, search, sort, page = 1, limit = 20, provider_id } = request.query;
     const offset = (page - 1) * limit;
 
@@ -44,6 +44,7 @@ export default async function serviceRoutes(fastify) {
       includes: s.includes ? JSON.parse(s.includes) : [],
     }));
 
+    reply.header('Cache-Control', 'public, max-age=60, stale-while-revalidate=120');
     return {
       services: parsed,
       total: countRow.total,

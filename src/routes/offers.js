@@ -2,7 +2,7 @@ import db from '../db.js';
 
 export default async function offerRoutes(fastify) {
     // GET /api/offers — public, list active offers optionally filtered by target
-    fastify.get('/', async (request) => {
+    fastify.get('/', async (request, reply) => {
         const { target } = request.query;
         let where = "WHERE o.active = 1 AND (o.valid_until IS NULL OR o.valid_until >= datetime('now'))";
         const params = [];
@@ -18,6 +18,8 @@ export default async function offerRoutes(fastify) {
       ${where}
       ORDER BY o.sort_order ASC, o.created_at DESC
     `).all(...params);
+
+        reply.header('Cache-Control', 'public, max-age=60, stale-while-revalidate=120');
 
         return { offers };
     });
