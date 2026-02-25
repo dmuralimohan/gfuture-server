@@ -39,7 +39,6 @@ export default async function serviceRoutes(fastify) {
       LIMIT ? OFFSET ?
     `).all(...params, Number(limit), Number(offset));
 
-    // Parse JSON includes
     const parsed = services.map((s) => ({
       ...s,
       includes: s.includes ? JSON.parse(s.includes) : [],

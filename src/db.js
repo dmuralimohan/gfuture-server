@@ -17,6 +17,7 @@ db.exec(`
     phone TEXT NOT NULL,
     password TEXT NOT NULL,
     role TEXT NOT NULL DEFAULT 'customer',
+    profile_picture TEXT,
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))
   );
@@ -56,6 +57,8 @@ db.exec(`
     status TEXT DEFAULT 'pending',
     subtotal REAL NOT NULL,
     platform_fee REAL NOT NULL,
+    discount_amount REAL DEFAULT 0,
+    coupon_code TEXT,
     total REAL NOT NULL,
     address TEXT,
     scheduled_date TEXT,
@@ -110,6 +113,57 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_otp_phone ON otp_verifications(phone, expires_at);
   CREATE INDEX IF NOT EXISTS idx_payment_order ON payments(order_id);
+
+  CREATE TABLE IF NOT EXISTS plans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    price REAL NOT NULL DEFAULT 0,
+    currency TEXT DEFAULT '₹',
+    description TEXT,
+    target TEXT NOT NULL DEFAULT 'both',
+    features TEXT,
+    recommended INTEGER DEFAULT 0,
+    active INTEGER DEFAULT 1,
+    cta TEXT DEFAULT 'Choose Plan',
+    sort_order INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS user_plans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    plan_id INTEGER NOT NULL,
+    status TEXT DEFAULT 'active',
+    subscribed_at TEXT DEFAULT (datetime('now')),
+    expires_at TEXT,
+    FOREIGN KEY (user_id) REFERENCES users(id),
+    FOREIGN KEY (plan_id) REFERENCES plans(id)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_user_plans_user ON user_plans(user_id, status);
+
+  CREATE TABLE IF NOT EXISTS offers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider_id TEXT,
+    title TEXT NOT NULL,
+    description TEXT,
+    discount_percent REAL DEFAULT 0,
+    discount_flat REAL DEFAULT 0,
+    code TEXT UNIQUE,
+    target TEXT NOT NULL DEFAULT 'both',
+    image TEXT,
+    badge TEXT,
+    valid_from TEXT DEFAULT (datetime('now')),
+    valid_until TEXT,
+    active INTEGER DEFAULT 1,
+    sort_order INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (provider_id) REFERENCES users(id)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_offers_active ON offers(active, valid_until);
 `);
 
 export default db;

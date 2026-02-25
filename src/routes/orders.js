@@ -6,7 +6,7 @@ const PLATFORM_FEE_RATE = 0.0102; // 1.02%
 export default async function orderRoutes(fastify) {
   // POST /api/orders — place order (authenticated)
   fastify.post('/', { preHandler: [fastify.authenticate] }, async (request, reply) => {
-    const { items, address, scheduled_date, scheduled_time } = request.body;
+    const { items, address, scheduled_date, scheduled_time, coupon_code } = request.body;
     const customerId = request.user.id;
 
     if (!items || items.length === 0) {
@@ -27,15 +27,42 @@ export default async function orderRoutes(fastify) {
       validItems.push({ service, quantity: qty });
     }
 
-    const platformFee = Math.round(subtotal * PLATFORM_FEE_RATE * 100) / 100;
-    const total = subtotal + platformFee;
+    // Validate and apply coupon
+    let discountAmount = 0;
+    let appliedCode = null;
+
+    if (coupon_code) {
+      const offer = db.prepare(`
+        SELECT * FROM offers
+        WHERE code = ? AND active = 1
+          AND (valid_until IS NULL OR valid_until >= datetime('now'))
+      `).get(coupon_code.toUpperCase());
+
+      if (offer) {
+        const userRole = request.user.role;
+        if (offer.target === 'both' || offer.target === userRole) {
+          if (offer.discount_percent > 0) {
+            discountAmount = Math.round((subtotal * offer.discount_percent / 100) * 100) / 100;
+          }
+          if (offer.discount_flat > 0) {
+            discountAmount += offer.discount_flat;
+          }
+          discountAmount = Math.min(discountAmount, subtotal);
+          appliedCode = offer.code;
+        }
+      }
+    }
+
+    const discountedSubtotal = subtotal - discountAmount;
+    const platformFee = Math.round(discountedSubtotal * PLATFORM_FEE_RATE * 100) / 100;
+    const total = discountedSubtotal + platformFee;
     const orderId = uuidv4();
 
     // Insert order
     db.prepare(`
-      INSERT INTO orders (id, customer_id, status, subtotal, platform_fee, total, address, scheduled_date, scheduled_time)
-      VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?)
-    `).run(orderId, customerId, subtotal, platformFee, total, JSON.stringify(address), scheduled_date, scheduled_time);
+      INSERT INTO orders (id, customer_id, status, subtotal, platform_fee, discount_amount, coupon_code, total, address, scheduled_date, scheduled_time)
+      VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(orderId, customerId, subtotal, platformFee, discountAmount, appliedCode, total, JSON.stringify(address), scheduled_date, scheduled_time);
 
     // Insert order items
     const insertItem = db.prepare('INSERT INTO order_items (order_id, service_id, quantity, price) VALUES (?, ?, ?, ?)');

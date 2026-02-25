@@ -128,11 +128,11 @@ export default async function authRoutes(fastify) {
 
   // PUT /api/auth/profile (protected)
   fastify.put('/profile', { preHandler: [fastify.authenticate] }, async (request) => {
-    const { name, email, phone } = request.body;
+    const { name, phone, profile_picture } = request.body;
     const userId = request.user.id;
 
-    db.prepare(`UPDATE users SET name = COALESCE(?, name), email = COALESCE(?, email), phone = COALESCE(?, phone), updated_at = datetime('now') WHERE id = ?`)
-      .run(name, email, phone, userId);
+    db.prepare(`UPDATE users SET name = COALESCE(?, name), phone = COALESCE(?, phone), profile_picture = COALESCE(?, profile_picture), updated_at = datetime('now') WHERE id = ?`)
+      .run(name, phone, profile_picture, userId);
 
     const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
     return { user: sanitizeUser(user) };

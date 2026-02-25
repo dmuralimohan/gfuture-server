@@ -485,4 +485,162 @@ export default async function adminRoutes(fastify) {
 
     return { payments, total, page: Number(page), totalPages: Math.ceil(total / Number(limit)) };
   });
+
+  // ─── Plans Management (Admin) ──────────────────────────────
+
+  // GET all plans (admin view — include inactive)
+  fastify.get('/plans', { preHandler: [adminOnly] }, async () => {
+    const plans = db.prepare('SELECT * FROM plans ORDER BY sort_order ASC').all();
+    const parsed = plans.map((p) => ({
+      ...p,
+      features: p.features ? JSON.parse(p.features) : [],
+    }));
+
+    // Subscriber counts
+    const enriched = parsed.map((p) => {
+      const subs = db.prepare("SELECT COUNT(*) as count FROM user_plans WHERE plan_id = ? AND status = 'active'").get(p.id);
+      return { ...p, subscriber_count: subs.count };
+    });
+
+    return { plans: enriched };
+  });
+
+  // POST create plan
+  fastify.post('/plans', { preHandler: [adminOnly] }, async (request, reply) => {
+    const { name, price, description, target, features, recommended, cta, sort_order, active } = request.body;
+    if (!name || price === undefined) return reply.status(400).send({ message: 'Name and price are required' });
+
+    const result = db.prepare(`
+      INSERT INTO plans (name, price, description, target, features, recommended, cta, sort_order, active)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(name, price, description, target || 'both', JSON.stringify(features || []), recommended ? 1 : 0, cta || 'Choose Plan', sort_order || 0, active !== undefined ? (active ? 1 : 0) : 1);
+
+    const plan = db.prepare('SELECT * FROM plans WHERE id = ?').get(result.lastInsertRowid);
+    plan.features = plan.features ? JSON.parse(plan.features) : [];
+    return reply.status(201).send({ plan });
+  });
+
+  // PUT update plan
+  fastify.put('/plans/:id', { preHandler: [adminOnly] }, async (request, reply) => {
+    const plan = db.prepare('SELECT * FROM plans WHERE id = ?').get(request.params.id);
+    if (!plan) return reply.status(404).send({ message: 'Plan not found' });
+
+    const { name, price, description, target, features, recommended, cta, sort_order, active } = request.body;
+
+    db.prepare(`
+      UPDATE plans SET
+        name = COALESCE(?, name),
+        price = COALESCE(?, price),
+        description = COALESCE(?, description),
+        target = COALESCE(?, target),
+        features = COALESCE(?, features),
+        recommended = COALESCE(?, recommended),
+        cta = COALESCE(?, cta),
+        sort_order = COALESCE(?, sort_order),
+        active = COALESCE(?, active),
+        updated_at = datetime('now')
+      WHERE id = ?
+    `).run(name, price, description, target, features ? JSON.stringify(features) : null, recommended !== undefined ? (recommended ? 1 : 0) : null, cta, sort_order, active !== undefined ? (active ? 1 : 0) : null, request.params.id);
+
+    const updated = db.prepare('SELECT * FROM plans WHERE id = ?').get(request.params.id);
+    updated.features = updated.features ? JSON.parse(updated.features) : [];
+    return { plan: updated };
+  });
+
+  // DELETE plan
+  fastify.delete('/plans/:id', { preHandler: [adminOnly] }, async (request, reply) => {
+    const plan = db.prepare('SELECT * FROM plans WHERE id = ?').get(request.params.id);
+    if (!plan) return reply.status(404).send({ message: 'Plan not found' });
+
+    const subs = db.prepare("SELECT COUNT(*) as count FROM user_plans WHERE plan_id = ? AND status = 'active'").get(request.params.id).count;
+    if (subs > 0) {
+      db.prepare("UPDATE plans SET active = 0, updated_at = datetime('now') WHERE id = ?").run(request.params.id);
+      return { message: `Plan deactivated (${subs} active subscribers)` };
+    }
+
+    db.prepare('DELETE FROM user_plans WHERE plan_id = ?').run(request.params.id);
+    db.prepare('DELETE FROM plans WHERE id = ?').run(request.params.id);
+    return { message: 'Plan deleted successfully' };
+  });
+
+  // GET plan subscribers
+  fastify.get('/plans/:id/subscribers', { preHandler: [adminOnly] }, async (request) => {
+    const subscribers = db.prepare(`
+      SELECT up.*, u.name, u.email, u.role
+      FROM user_plans up
+      JOIN users u ON up.user_id = u.id
+      WHERE up.plan_id = ? AND up.status = 'active'
+      ORDER BY up.subscribed_at DESC
+    `).all(request.params.id);
+    return { subscribers };
+  });
+
+  // ─── Offers Management (Admin) ─────────────────────────────
+
+  // GET all offers (admin — include inactive/expired)
+  fastify.get('/offers', { preHandler: [adminOnly] }, async () => {
+    const offers = db.prepare(`
+      SELECT o.*, u.name as provider_name
+      FROM offers o
+      LEFT JOIN users u ON o.provider_id = u.id
+      ORDER BY o.sort_order ASC, o.created_at DESC
+    `).all();
+    return { offers };
+  });
+
+  // POST create offer
+  fastify.post('/offers', { preHandler: [adminOnly] }, async (request, reply) => {
+    const { title, description, discount_percent, discount_flat, code, target, image, badge, valid_from, valid_until, active, sort_order } = request.body;
+    if (!title) return reply.status(400).send({ message: 'Title is required' });
+
+    const result = db.prepare(`
+      INSERT INTO offers (provider_id, title, description, discount_percent, discount_flat, code, target, image, badge, valid_from, valid_until, active, sort_order)
+      VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      title, description || '', discount_percent || 0, discount_flat || 0,
+      code || null, target || 'both', image || '', badge || '',
+      valid_from || new Date().toISOString(), valid_until || null,
+      active !== undefined ? (active ? 1 : 0) : 1, sort_order || 0
+    );
+
+    const offer = db.prepare('SELECT * FROM offers WHERE id = ?').get(result.lastInsertRowid);
+    return reply.status(201).send({ offer });
+  });
+
+  // PUT update offer
+  fastify.put('/offers/:id', { preHandler: [adminOnly] }, async (request, reply) => {
+    const offer = db.prepare('SELECT * FROM offers WHERE id = ?').get(request.params.id);
+    if (!offer) return reply.status(404).send({ message: 'Offer not found' });
+
+    const { title, description, discount_percent, discount_flat, code, target, image, badge, valid_from, valid_until, active, sort_order } = request.body;
+
+    db.prepare(`
+      UPDATE offers SET
+        title = COALESCE(?, title),
+        description = COALESCE(?, description),
+        discount_percent = COALESCE(?, discount_percent),
+        discount_flat = COALESCE(?, discount_flat),
+        code = COALESCE(?, code),
+        target = COALESCE(?, target),
+        image = COALESCE(?, image),
+        badge = COALESCE(?, badge),
+        valid_from = COALESCE(?, valid_from),
+        valid_until = COALESCE(?, valid_until),
+        active = COALESCE(?, active),
+        sort_order = COALESCE(?, sort_order),
+        updated_at = datetime('now')
+      WHERE id = ?
+    `).run(title, description, discount_percent, discount_flat, code, target, image, badge, valid_from, valid_until, active !== undefined ? (active ? 1 : 0) : null, sort_order, request.params.id);
+
+    const updated = db.prepare('SELECT * FROM offers WHERE id = ?').get(request.params.id);
+    return { offer: updated };
+  });
+
+  // DELETE offer
+  fastify.delete('/offers/:id', { preHandler: [adminOnly] }, async (request, reply) => {
+    const offer = db.prepare('SELECT * FROM offers WHERE id = ?').get(request.params.id);
+    if (!offer) return reply.status(404).send({ message: 'Offer not found' });
+    db.prepare('DELETE FROM offers WHERE id = ?').run(request.params.id);
+    return { message: 'Offer deleted successfully' };
+  });
 }

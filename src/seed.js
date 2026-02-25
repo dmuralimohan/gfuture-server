@@ -58,6 +58,122 @@ servicesData.forEach((s) => {
   insertService.run(s.name, s.cat, providerId, s.price, s.rating, s.reviews, s.duration, s.warranty, s.desc, JSON.stringify(s.includes), s.image);
 });
 
+// Seed Plans
+const plansData = [
+  {
+    name: 'Basic Starter',
+    price: 500,
+    description: 'Perfect for beginners',
+    target: 'both',
+    features: ['Marketplace Access', 'Referral ID', 'Joining Gift', 'Dashboard Hub'],
+    recommended: 0,
+    cta: 'Choose Plan',
+    sort_order: 1,
+  },
+  {
+    name: 'Moderator Pro',
+    price: 10000,
+    description: 'Recommended for Learners',
+    target: 'both',
+    features: ['Priority Sync', 'Higher Share Rate (2x)', 'Training Suite', 'Team Manager Tools'],
+    recommended: 1,
+    cta: 'Choose Plan',
+    sort_order: 2,
+  },
+  {
+    name: 'Growth Engine',
+    price: 25000,
+    description: 'For growing businesses',
+    target: 'provider',
+    features: ['Elite Share Tier', 'Custom Hub View', 'Priority Support', 'Advanced Analytics'],
+    recommended: 0,
+    cta: 'Choose Plan',
+    sort_order: 3,
+  },
+  {
+    name: 'Market Node',
+    price: 50000,
+    description: 'Enterprise-level access',
+    target: 'provider',
+    features: ['Global Governance', 'Market Pool', 'White-label Dashboard', 'Dedicated Manager'],
+    recommended: 0,
+    cta: 'Choose Plan',
+    sort_order: 4,
+  },
+];
+
+const insertPlan = db.prepare(`
+  INSERT OR IGNORE INTO plans (name, price, description, target, features, recommended, cta, sort_order)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+`);
+
+plansData.forEach((p) => {
+  insertPlan.run(p.name, p.price, p.description, p.target, JSON.stringify(p.features), p.recommended, p.cta, p.sort_order);
+});
+
+// Seed Offers
+const offersData = [
+  {
+    title: '20% Off First Service',
+    description: 'New customer special! Get 20% discount on your first service booking.',
+    discount_percent: 20,
+    code: 'WELCOME20',
+    target: 'customer',
+    badge: 'NEW USER',
+    image: 'https://images.unsplash.com/photo-1607082349566-187342175e2f?w=800',
+    sort_order: 1,
+  },
+  {
+    title: 'Flat ₹500 Off AC Service',
+    description: 'Summer special! Book any AC service and get ₹500 off instantly.',
+    discount_flat: 500,
+    code: 'COOL500',
+    target: 'customer',
+    badge: 'SUMMER DEAL',
+    image: 'https://images.unsplash.com/photo-1631545806609-4a0fa1e4d176?w=800',
+    sort_order: 2,
+  },
+  {
+    title: '0% Commission First Month',
+    description: 'Join as provider and enjoy zero commission for your first month of services.',
+    discount_percent: 100,
+    code: 'PROVIDER0',
+    target: 'provider',
+    badge: 'PROVIDERS',
+    image: 'https://images.unsplash.com/photo-1556742049-0cfed4f6a45d?w=800',
+    sort_order: 3,
+  },
+  {
+    title: 'Refer & Earn ₹200',
+    description: 'Refer a friend and both of you get ₹200 credit on next booking!',
+    discount_flat: 200,
+    code: 'REFER200',
+    target: 'both',
+    badge: 'REFER & EARN',
+    image: 'https://images.unsplash.com/photo-1521791136064-7986c2920216?w=800',
+    sort_order: 4,
+  },
+  {
+    title: 'Premium Plan – 30% Off',
+    description: 'Upgrade to Moderator Pro plan and save 30% this month only.',
+    discount_percent: 30,
+    code: 'PREMIUM30',
+    target: 'both',
+    badge: 'LIMITED TIME',
+    image: 'https://images.unsplash.com/photo-1553729459-afe8f2e2389d?w=800',
+    sort_order: 5,
+  },
+];
+
+const insertOffer = db.prepare(`
+  INSERT OR IGNORE INTO offers (provider_id, title, description, discount_percent, discount_flat, code, target, image, badge, sort_order)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`);
+
+offersData.forEach((o) => {
+  insertOffer.run(o.provider_id || null, o.title, o.description, o.discount_percent || 0, o.discount_flat || 0, o.code, o.target, o.image || '', o.badge || '', o.sort_order);
+});
+
 console.log('✅ Database seeded successfully!');
 console.log('📧 Demo accounts:');
 console.log('   Customer: customer@demo.com / password123');

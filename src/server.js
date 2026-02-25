@@ -8,6 +8,8 @@ import categoryRoutes from './routes/categories.js';
 import otpRoutes from './routes/otp.js';
 import paymentRoutes from './routes/payments.js';
 import adminRoutes from './routes/admin.js';
+import planRoutes from './routes/plans.js';
+import offerRoutes from './routes/offers.js';
 
 const app = Fastify({ logger: true });
 
@@ -45,6 +47,8 @@ app.register(categoryRoutes, { prefix: '/api/categories' });
 app.register(otpRoutes, { prefix: '/api/otp' });
 app.register(paymentRoutes, { prefix: '/api/payments' });
 app.register(adminRoutes, { prefix: '/api/admin' });
+app.register(planRoutes, { prefix: '/api/plans' });
+app.register(offerRoutes, { prefix: '/api/offers' });
 
 // Health check
 app.get('/api/health', async () => ({ status: 'ok', timestamp: new Date().toISOString() }));
