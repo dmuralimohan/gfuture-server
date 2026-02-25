@@ -166,5 +166,17 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_offers_active ON offers(active, valid_until);
 `);
 
+// Migrations: add columns that may be missing in older databases
+const migrations = [
+  { table: 'users', column: 'profile_picture', type: 'TEXT' },
+];
+
+for (const { table, column, type } of migrations) {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all();
+  if (!columns.some(c => c.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+  }
+}
+
 export default db;
 

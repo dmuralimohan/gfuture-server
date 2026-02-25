@@ -132,7 +132,7 @@ export default async function authRoutes(fastify) {
     const userId = request.user.id;
 
     db.prepare(`UPDATE users SET name = COALESCE(?, name), phone = COALESCE(?, phone), profile_picture = COALESCE(?, profile_picture), updated_at = datetime('now') WHERE id = ?`)
-      .run(name, phone, profile_picture, userId);
+      .run(name || null, phone || null, profile_picture || null, userId);
 
     const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
     return { user: sanitizeUser(user) };
