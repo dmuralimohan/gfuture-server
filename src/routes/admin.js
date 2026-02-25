@@ -539,10 +539,13 @@ export default async function adminRoutes(fastify) {
     const { name, price, description, target, features, recommended, cta, sort_order, active } = request.body;
     if (!name || price === undefined) return reply.status(400).send({ message: 'Name and price are required' });
 
+    // Default sort_order to max+1 so new plans appear at the end
+    const maxSort = db.prepare('SELECT COALESCE(MAX(sort_order), 0) + 1 as next FROM plans').get().next;
+
     const result = db.prepare(`
       INSERT INTO plans (name, price, description, target, features, recommended, cta, sort_order, active)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(name, price, description, target || 'both', JSON.stringify(features || []), recommended ? 1 : 0, cta || 'Choose Plan', sort_order || 0, active !== undefined ? (active ? 1 : 0) : 1);
+    `).run(name, price, description, target || 'both', JSON.stringify(features || []), recommended ? 1 : 0, cta || 'Choose Plan', sort_order ?? maxSort, active !== undefined ? (active ? 1 : 0) : 1);
 
     const plan = db.prepare('SELECT * FROM plans WHERE id = ?').get(result.lastInsertRowid);
     plan.features = plan.features ? JSON.parse(plan.features) : [];
