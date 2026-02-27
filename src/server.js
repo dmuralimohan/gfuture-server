@@ -20,7 +20,7 @@ const allowedOrigins = process.env.CORS_ORIGINS
   : ['http://localhost:5173', 'http://localhost:5174', 'http://localhost:3000', 'http://3.95.226.54:3001', 'http://10.69.67.139:5173'];
 
 await app.register(cors, {
-  origin: allowedOrigins,
+  origin: true,
   credentials: true,
   methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
