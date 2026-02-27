@@ -10,6 +10,7 @@ import paymentRoutes from './routes/payments.js';
 import adminRoutes from './routes/admin.js';
 import planRoutes from './routes/plans.js';
 import offerRoutes from './routes/offers.js';
+import walletRoutes from './routes/wallet.js';
 
 const app = Fastify({ logger: true });
 
@@ -49,6 +50,7 @@ app.register(paymentRoutes, { prefix: '/api/payments' });
 app.register(adminRoutes, { prefix: '/api/admin' });
 app.register(planRoutes, { prefix: '/api/plans' });
 app.register(offerRoutes, { prefix: '/api/offers' });
+app.register(walletRoutes, { prefix: '/api/wallet' });
 
 // Health check
 app.get('/api/health', async () => ({ status: 'ok', timestamp: new Date().toISOString() }));

@@ -179,6 +179,36 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_offers_active ON offers(active, valid_until);
   CREATE INDEX IF NOT EXISTS idx_user_plans_plan ON user_plans(plan_id);
   CREATE INDEX IF NOT EXISTS idx_offers_provider ON offers(provider_id);
+
+  -- Wallet & Credit Points
+  CREATE TABLE IF NOT EXISTS wallets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL UNIQUE,
+    balance REAL NOT NULL DEFAULT 0,
+    credit_points INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS wallet_transactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    type TEXT NOT NULL,
+    amount REAL NOT NULL DEFAULT 0,
+    credit_points INTEGER NOT NULL DEFAULT 0,
+    description TEXT,
+    reference_type TEXT,
+    reference_id TEXT,
+    balance_after REAL,
+    credits_after INTEGER,
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users(id)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_wallets_user ON wallets(user_id);
+  CREATE INDEX IF NOT EXISTS idx_wallet_txn_user ON wallet_transactions(user_id);
+  CREATE INDEX IF NOT EXISTS idx_wallet_txn_type ON wallet_transactions(type);
 `);
 
 // Migrations: add columns that may be missing in older databases

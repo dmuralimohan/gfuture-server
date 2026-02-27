@@ -2,6 +2,7 @@ import bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
 import crypto from 'crypto';
 import db from '../db.js';
+import { ensureWallet } from './wallet.js';
 
 // Refresh token expires in 7 days
 const REFRESH_TOKEN_EXPIRY_DAYS = 7;
@@ -45,12 +46,17 @@ export default async function authRoutes(fastify) {
       .run(userId, name, email, phone, hashedPassword, userRole);
 
     const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
+    // Initialize wallet with welcome bonus
+    ensureWallet(userId);
     const accessToken = fastify.jwt.sign({ id: user.id, email: user.email, role: user.role });
     const refreshToken = generateRefreshToken();
     saveRefreshToken(userId, refreshToken);
 
+    const wallet = db.prepare('SELECT * FROM wallets WHERE user_id = ?').get(userId);
+
     return reply.status(201).send({
       user: sanitizeUser(user),
+      wallet,
       accessToken,
       refreshToken,
     });
