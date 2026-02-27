@@ -31,7 +31,9 @@ const demoUsers = [
 const insertUser = db.prepare('INSERT INTO users (id, name, email, phone, password, role) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(email) DO UPDATE SET password = excluded.password');
 demoUsers.forEach((u) => insertUser.run(u.id, u.name, u.email, u.phone, password, u.role));
 
-const providerId = demoUsers[1].id;
+// Get the actual provider ID from DB (may differ from generated uuid if user already existed)
+const providerRow = db.prepare('SELECT id FROM users WHERE email = ?').get('provider@demo.com');
+const providerId = providerRow.id;
 
 // Seed Services
 const servicesData = [
