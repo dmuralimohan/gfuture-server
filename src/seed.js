@@ -28,7 +28,7 @@ const demoUsers = [
   { id: uuidv4(), name: 'Admin User', email: 'admin@demo.com', phone: '9876543212', role: 'admin' },
 ];
 
-const insertUser = db.prepare('INSERT OR IGNORE INTO users (id, name, email, phone, password, role) VALUES (?, ?, ?, ?, ?, ?)');
+const insertUser = db.prepare('INSERT INTO users (id, name, email, phone, password, role) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(email) DO UPDATE SET password = excluded.password');
 demoUsers.forEach((u) => insertUser.run(u.id, u.name, u.email, u.phone, password, u.role));
 
 const providerId = demoUsers[1].id;
