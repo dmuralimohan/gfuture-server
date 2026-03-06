@@ -32,7 +32,7 @@ const insertUser = db.prepare('INSERT INTO users (id, name, email, phone, passwo
 demoUsers.forEach((u) => insertUser.run(u.id, u.name, u.email, u.phone, password, u.role));
 
 // Get the actual provider ID from DB (may differ from generated uuid if user already existed)
-const providerRow = db.prepare('SELECT id FROM users WHERE email = ?').get('provider@demo.com');
+const providerRow = db.prepare('SELECT id FROM users WHERE email = ?').get('provider@gfuture.com');
 const providerId = providerRow.id;
 
 // Seed Services (only if table is empty — preserves admin deletions/edits)
