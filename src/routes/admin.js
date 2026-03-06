@@ -338,12 +338,18 @@ export default async function adminRoutes(fastify) {
     const service = db.prepare('SELECT * FROM services WHERE id = ?').get(request.params.id);
     if (!service) return reply.status(404).send({ message: 'Service not found' });
 
-    // Check if service has orders
+    // If service is already inactive, force hard-delete (admin explicitly wants it gone)
+    if (service.active === 0) {
+      db.prepare('DELETE FROM order_items WHERE service_id = ?').run(request.params.id);
+      db.prepare('DELETE FROM services WHERE id = ?').run(request.params.id);
+      return { message: 'Service permanently deleted' };
+    }
+
+    // Check if service has orders — soft-delete first time
     const orderCount = db.prepare('SELECT COUNT(*) as count FROM order_items WHERE service_id = ?').get(request.params.id).count;
     if (orderCount > 0) {
-      // Soft-delete: deactivate
       db.prepare("UPDATE services SET active = 0, updated_at = datetime('now') WHERE id = ?").run(request.params.id);
-      return { message: 'Service deactivated (has existing orders)' };
+      return { message: 'Service deactivated (has existing orders). Delete again to permanently remove.' };
     }
 
     db.prepare('DELETE FROM services WHERE id = ?').run(request.params.id);
