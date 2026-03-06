@@ -30,9 +30,9 @@ Copy `.env.example` to `.env` and configure:
 
 | Role | Email | Password |
 |------|-------|----------|
-| Customer | `customer@demo.com` | `password123` |
-| Provider | `provider@demo.com` | `password123` |
-| Admin | `admin@demo.com` | `password123` |
+| Customer | `customer@gfuture.com` | `password123` |
+| Provider | `provider@gfuture.com` | `password123` |
+| Admin | `admin@gfuture.com` | `password123` |
 
 ## API Endpoints
 

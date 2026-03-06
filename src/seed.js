@@ -23,9 +23,9 @@ cats.forEach((c, i) => insertCat.run(i + 1, c.name, c.icon));
 const password = await bcrypt.hash('password123', 12);
 
 const demoUsers = [
-  { id: uuidv4(), name: 'Demo Customer', email: 'customer@demo.com', phone: '9876543210', role: 'customer' },
-  { id: uuidv4(), name: 'Ravi Kumar', email: 'provider@demo.com', phone: '9876543211', role: 'provider' },
-  { id: uuidv4(), name: 'Admin User', email: 'admin@demo.com', phone: '9876543212', role: 'admin' },
+  { id: uuidv4(), name: 'Demo Customer', email: 'customer@gfuture.com', phone: '1234567890', role: 'customer' },
+  { id: uuidv4(), name: 'Ravi Kumar', email: 'provider@gfuture.com', phone: '1234567890', role: 'provider' },
+  { id: uuidv4(), name: 'Admin User', email: 'admin@gfuture.com', phone: '1234567890', role: 'admin' },
 ];
 
 const insertUser = db.prepare('INSERT INTO users (id, name, email, phone, password, role) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(email) DO UPDATE SET password = excluded.password');
@@ -196,7 +196,7 @@ if (existingOffersCount === 0) {
 
 console.log('✅ Database seeded successfully!');
 console.log('📧 Demo accounts:');
-console.log('   Customer: customer@demo.com / password123');
-console.log('   Provider: provider@demo.com / password123');
-console.log('   Admin:    admin@demo.com / password123');
+console.log('   Customer: customer@gfuture.com / password123');
+console.log('   Provider: provider@gfuture.com / password123');
+console.log('   Admin:    admin@gfuture.com / password123');
 
