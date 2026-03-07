@@ -44,6 +44,9 @@ db.exec(`
     duration TEXT,
     warranty TEXT,
     includes TEXT,
+    type TEXT NOT NULL DEFAULT 'service',
+    size_value TEXT,
+    size_unit TEXT,
     active INTEGER DEFAULT 1,
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now')),
@@ -209,6 +212,35 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_wallets_user ON wallets(user_id);
   CREATE INDEX IF NOT EXISTS idx_wallet_txn_user ON wallet_transactions(user_id);
   CREATE INDEX IF NOT EXISTS idx_wallet_txn_type ON wallet_transactions(type);
+
+  -- Platform Settings
+  CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    label TEXT,
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+
+  -- Insert default settings if not present
+  INSERT OR IGNORE INTO settings (key, value, label) VALUES ('platform_fee_rate', '1.02', 'Platform Fee (%)');
+  INSERT OR IGNORE INTO settings (key, value, label) VALUES ('extra_fee_label', '', 'Extra Fee Label');
+  INSERT OR IGNORE INTO settings (key, value, label) VALUES ('extra_fee_amount', '0', 'Extra Fee Amount (₹)');
+
+  -- Promo Cards (editable from admin)
+  CREATE TABLE IF NOT EXISTS promo_cards (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    subtitle TEXT NOT NULL,
+    description TEXT,
+    cta TEXT DEFAULT 'Book now',
+    bg TEXT DEFAULT 'linear-gradient(135deg, #fef3c7 0%, #fde68a 100%)',
+    image TEXT,
+    link TEXT DEFAULT '/services',
+    sort_order INTEGER DEFAULT 0,
+    active INTEGER DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
 `);
 
 // Migrations: add columns that may be missing in older databases
@@ -216,6 +248,9 @@ const migrations = [
   { table: 'users', column: 'profile_picture', type: 'TEXT' },
   { table: 'orders', column: 'discount_amount', type: 'REAL DEFAULT 0' },
   { table: 'orders', column: 'coupon_code', type: 'TEXT' },
+  { table: 'services', column: 'type', type: "TEXT NOT NULL DEFAULT 'service'" },
+  { table: 'services', column: 'size_value', type: 'TEXT' },
+  { table: 'services', column: 'size_unit', type: 'TEXT' },
 ];
 
 for (const { table, column, type } of migrations) {

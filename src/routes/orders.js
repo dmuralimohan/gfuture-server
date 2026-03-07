@@ -1,7 +1,38 @@
 import { v4 as uuidv4 } from 'uuid';
 import db from '../db.js';
 
-const PLATFORM_FEE_RATE = 0.0102; // 1.02%
+const PLATFORM_FEE_RATE = 0.0102; // 1.02% - default fallback
+
+function getPlatformFeeRate() {
+  try {
+    const row = db.prepare("SELECT value FROM settings WHERE key = 'platform_fee_rate'").get();
+    return row ? Number(row.value) / 100 : PLATFORM_FEE_RATE;
+  } catch {
+    return PLATFORM_FEE_RATE;
+  }
+}
+
+function getExtraFees() {
+  try {
+    const rows = db.prepare("SELECT key, value, label FROM settings WHERE key LIKE 'extra_fee_%' OR key LIKE 'custom_fee_%'").all();
+    const fees = [];
+    // Group by label/amount pairs
+    const labelRow = rows.find(r => r.key === 'extra_fee_label');
+    const amountRow = rows.find(r => r.key === 'extra_fee_amount');
+    if (labelRow && labelRow.value && amountRow && Number(amountRow.value) > 0) {
+      fees.push({ label: labelRow.value, amount: Number(amountRow.value) });
+    }
+    // Custom fees
+    for (const r of rows) {
+      if (r.key.startsWith('custom_fee_') && !r.key.endsWith('_label')) {
+        fees.push({ label: r.label, amount: Number(r.value) });
+      }
+    }
+    return fees;
+  } catch {
+    return [];
+  }
+}
 
 export default async function orderRoutes(fastify) {
   // POST /api/orders — place order (authenticated)
@@ -54,8 +85,11 @@ export default async function orderRoutes(fastify) {
     }
 
     const discountedSubtotal = subtotal - discountAmount;
-    const platformFee = Math.round(discountedSubtotal * PLATFORM_FEE_RATE * 100) / 100;
-    const total = discountedSubtotal + platformFee;
+    const feeRate = getPlatformFeeRate();
+    const platformFee = Math.round(discountedSubtotal * feeRate * 100) / 100;
+    const extraFees = getExtraFees();
+    const extraFeeTotal = extraFees.reduce((sum, f) => sum + f.amount, 0);
+    const total = discountedSubtotal + platformFee + extraFeeTotal;
     const orderId = uuidv4();
 
     // Insert order

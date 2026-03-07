@@ -11,6 +11,7 @@ import adminRoutes from './routes/admin.js';
 import planRoutes from './routes/plans.js';
 import offerRoutes from './routes/offers.js';
 import walletRoutes from './routes/wallet.js';
+import db from './db.js';
 
 const app = Fastify({ logger: true });
 
@@ -54,6 +55,24 @@ app.register(walletRoutes, { prefix: '/api/wallet' });
 
 // Health check
 app.get('/api/health', async () => ({ status: 'ok', timestamp: new Date().toISOString() }));
+
+// Public settings (for platform fee display on frontend)
+app.get('/api/settings/public', async (request, reply) => {
+  const settings = db.prepare('SELECT key, value, label FROM settings').all();
+  const map = {};
+  for (const s of settings) {
+    map[s.key] = { value: s.value, label: s.label };
+  }
+  reply.header('Cache-Control', 'public, max-age=60, stale-while-revalidate=120');
+  return { settings: map };
+});
+
+// Public promo cards (for home page)
+app.get('/api/promo-cards', async (request, reply) => {
+  const cards = db.prepare('SELECT * FROM promo_cards WHERE active = 1 ORDER BY sort_order ASC, id ASC').all();
+  reply.header('Cache-Control', 'public, max-age=60, stale-while-revalidate=120');
+  return { promoCards: cards };
+});
 
 // Start
 const PORT = process.env.PORT || 3001;

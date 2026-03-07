@@ -292,15 +292,15 @@ export default async function adminRoutes(fastify) {
 
   // POST create service (admin)
   fastify.post('/services', { preHandler: [adminOnly] }, async (request, reply) => {
-    const { name, category_id, provider_id, price, description, duration, warranty, image, includes } = request.body;
+    const { name, category_id, provider_id, price, description, duration, warranty, image, includes, type, size_value, size_unit } = request.body;
     if (!name || !category_id || !price) {
       return reply.status(400).send({ message: 'Name, category and price are required' });
     }
 
     const result = db.prepare(`
-      INSERT INTO services (name, category_id, provider_id, price, description, duration, warranty, image, includes)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(name, category_id, provider_id || null, price, description, duration, warranty, image, JSON.stringify(includes || []));
+      INSERT INTO services (name, category_id, provider_id, price, description, duration, warranty, image, includes, type, size_value, size_unit)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(name, category_id, provider_id || null, price, description, duration, warranty, image, JSON.stringify(includes || []), type || 'service', size_value || null, size_unit || null);
 
     const service = db.prepare('SELECT * FROM services WHERE id = ?').get(result.lastInsertRowid);
     return reply.status(201).send({ service });
@@ -311,7 +311,7 @@ export default async function adminRoutes(fastify) {
     const service = db.prepare('SELECT * FROM services WHERE id = ?').get(request.params.id);
     if (!service) return reply.status(404).send({ message: 'Service not found' });
 
-    const { name, category_id, provider_id, price, description, duration, warranty, image, includes, active } = request.body;
+    const { name, category_id, provider_id, price, description, duration, warranty, image, includes, active, type, size_value, size_unit } = request.body;
     db.prepare(`
       UPDATE services SET
         name = COALESCE(?, name),
@@ -324,9 +324,12 @@ export default async function adminRoutes(fastify) {
         image = COALESCE(?, image),
         includes = COALESCE(?, includes),
         active = COALESCE(?, active),
+        type = COALESCE(?, type),
+        size_value = ?,
+        size_unit = ?,
         updated_at = datetime('now')
       WHERE id = ?
-    `).run(name, category_id, provider_id, price, description, duration, warranty, image, includes ? JSON.stringify(includes) : null, active, request.params.id);
+    `).run(name, category_id, provider_id, price, description, duration, warranty, image, includes ? JSON.stringify(includes) : null, active, type, size_value !== undefined ? size_value : null, size_unit !== undefined ? size_unit : null, request.params.id);
 
     const updated = db.prepare('SELECT s.*, c.name as category_name FROM services s LEFT JOIN categories c ON s.category_id = c.id WHERE s.id = ?').get(request.params.id);
     updated.includes = updated.includes ? JSON.parse(updated.includes) : [];
@@ -680,5 +683,121 @@ export default async function adminRoutes(fastify) {
     if (!offer) return reply.status(404).send({ message: 'Offer not found' });
     db.prepare('DELETE FROM offers WHERE id = ?').run(request.params.id);
     return { message: 'Offer deleted successfully' };
+  });
+
+  // ─── Platform Settings ──────────────────────────────────────
+
+  // GET all settings (admin)
+  fastify.get('/settings', { preHandler: [adminOnly] }, async () => {
+    const settings = db.prepare('SELECT * FROM settings ORDER BY key').all();
+    return { settings };
+  });
+
+  // PUT update settings (admin)
+  fastify.put('/settings', { preHandler: [adminOnly] }, async (request, reply) => {
+    const { settings } = request.body;
+    if (!settings || !Array.isArray(settings)) {
+      return reply.status(400).send({ message: 'Settings array is required' });
+    }
+
+    const upsert = db.prepare(`
+      INSERT INTO settings (key, value, label, updated_at) VALUES (?, ?, ?, datetime('now'))
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, label = excluded.label, updated_at = datetime('now')
+    `);
+
+    const updateAll = db.transaction((items) => {
+      for (const item of items) {
+        upsert.run(item.key, String(item.value), item.label || item.key);
+      }
+    });
+
+    updateAll(settings);
+    const updated = db.prepare('SELECT * FROM settings ORDER BY key').all();
+    return { settings: updated };
+  });
+
+  // POST add a new custom fee
+  fastify.post('/settings/fee', { preHandler: [adminOnly] }, async (request, reply) => {
+    const { key, label, value } = request.body;
+    if (!key || !label) {
+      return reply.status(400).send({ message: 'Key and label are required' });
+    }
+    db.prepare(`
+      INSERT INTO settings (key, value, label, updated_at) VALUES (?, ?, ?, datetime('now'))
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, label = excluded.label, updated_at = datetime('now')
+    `).run(key, String(value || 0), label);
+    const settings = db.prepare('SELECT * FROM settings ORDER BY key').all();
+    return reply.status(201).send({ settings });
+  });
+
+  // DELETE a custom fee setting
+  fastify.delete('/settings/:key', { preHandler: [adminOnly] }, async (request, reply) => {
+    const { key } = request.params;
+    // Don't allow deleting core settings
+    if (key === 'platform_fee_rate') {
+      return reply.status(400).send({ message: 'Cannot delete core platform fee setting' });
+    }
+    db.prepare('DELETE FROM settings WHERE key = ?').run(key);
+    return { message: 'Setting deleted successfully' };
+  });
+
+  // ─── Promo Cards Management (Admin) ────────────────────────
+
+  // GET all promo cards (admin — include inactive)
+  fastify.get('/promo-cards', { preHandler: [adminOnly] }, async () => {
+    const cards = db.prepare('SELECT * FROM promo_cards ORDER BY sort_order ASC, id ASC').all();
+    return { promoCards: cards };
+  });
+
+  // POST create promo card
+  fastify.post('/promo-cards', { preHandler: [adminOnly] }, async (request, reply) => {
+    const { title, subtitle, description, cta, bg, image, link, sort_order, active } = request.body;
+    if (!title || !subtitle) {
+      return reply.status(400).send({ message: 'Title and subtitle are required' });
+    }
+    const result = db.prepare(`
+      INSERT INTO promo_cards (title, subtitle, description, cta, bg, image, link, sort_order, active)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      title, subtitle, description || '', cta || 'Book now',
+      bg || 'linear-gradient(135deg, #fef3c7 0%, #fde68a 100%)',
+      image || '', link || '/services', sort_order || 0,
+      active !== undefined ? (active ? 1 : 0) : 1
+    );
+    const card = db.prepare('SELECT * FROM promo_cards WHERE id = ?').get(result.lastInsertRowid);
+    return reply.status(201).send({ promoCard: card });
+  });
+
+  // PUT update promo card
+  fastify.put('/promo-cards/:id', { preHandler: [adminOnly] }, async (request, reply) => {
+    const card = db.prepare('SELECT * FROM promo_cards WHERE id = ?').get(request.params.id);
+    if (!card) return reply.status(404).send({ message: 'Promo card not found' });
+
+    const { title, subtitle, description, cta, bg, image, link, sort_order, active } = request.body;
+    db.prepare(`
+      UPDATE promo_cards SET
+        title = COALESCE(?, title),
+        subtitle = COALESCE(?, subtitle),
+        description = COALESCE(?, description),
+        cta = COALESCE(?, cta),
+        bg = COALESCE(?, bg),
+        image = COALESCE(?, image),
+        link = COALESCE(?, link),
+        sort_order = COALESCE(?, sort_order),
+        active = COALESCE(?, active),
+        updated_at = datetime('now')
+      WHERE id = ?
+    `).run(title, subtitle, description, cta, bg, image, link, sort_order, active !== undefined ? (active ? 1 : 0) : null, request.params.id);
+
+    const updated = db.prepare('SELECT * FROM promo_cards WHERE id = ?').get(request.params.id);
+    return { promoCard: updated };
+  });
+
+  // DELETE promo card
+  fastify.delete('/promo-cards/:id', { preHandler: [adminOnly] }, async (request, reply) => {
+    const card = db.prepare('SELECT * FROM promo_cards WHERE id = ?').get(request.params.id);
+    if (!card) return reply.status(404).send({ message: 'Promo card not found' });
+    db.prepare('DELETE FROM promo_cards WHERE id = ?').run(request.params.id);
+    return { message: 'Promo card deleted successfully' };
   });
 }
