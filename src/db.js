@@ -107,8 +107,11 @@ db.exec(`
     amount REAL NOT NULL,
     upi_id TEXT,
     status TEXT DEFAULT 'pending',
-    method TEXT DEFAULT 'upi',
+    method TEXT DEFAULT 'razorpay',
     transaction_ref TEXT,
+    razorpay_order_id TEXT,
+    razorpay_payment_id TEXT,
+    razorpay_signature TEXT,
     paid_at TEXT,
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now')),
@@ -251,6 +254,9 @@ const migrations = [
   { table: 'services', column: 'type', type: "TEXT NOT NULL DEFAULT 'service'" },
   { table: 'services', column: 'size_value', type: 'TEXT' },
   { table: 'services', column: 'size_unit', type: 'TEXT' },
+  { table: 'payments', column: 'razorpay_order_id', type: 'TEXT' },
+  { table: 'payments', column: 'razorpay_payment_id', type: 'TEXT' },
+  { table: 'payments', column: 'razorpay_signature', type: 'TEXT' },
 ];
 
 for (const { table, column, type } of migrations) {
