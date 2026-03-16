@@ -229,6 +229,59 @@ db.exec(`
   INSERT OR IGNORE INTO settings (key, value, label) VALUES ('extra_fee_label', '', 'Extra Fee Label');
   INSERT OR IGNORE INTO settings (key, value, label) VALUES ('extra_fee_amount', '0', 'Extra Fee Amount (₹)');
 
+  -- G-Rider: ride-hailing feature
+  CREATE TABLE IF NOT EXISTS rides (
+    id TEXT PRIMARY KEY,
+    customer_id TEXT NOT NULL,
+    rider_id TEXT,
+    status TEXT DEFAULT 'searching',
+    vehicle_type TEXT NOT NULL DEFAULT 'bike',
+    pickup_address TEXT NOT NULL,
+    pickup_lat REAL,
+    pickup_lng REAL,
+    drop_address TEXT NOT NULL,
+    drop_lat REAL,
+    drop_lng REAL,
+    distance_km REAL,
+    estimated_fare REAL,
+    final_fare REAL,
+    otp TEXT,
+    rating REAL,
+    rating_comment TEXT,
+    started_at TEXT,
+    completed_at TEXT,
+    cancelled_at TEXT,
+    cancel_reason TEXT,
+    cancelled_by TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (customer_id) REFERENCES users(id),
+    FOREIGN KEY (rider_id) REFERENCES users(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS riders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL UNIQUE,
+    vehicle_type TEXT NOT NULL DEFAULT 'bike',
+    vehicle_number TEXT,
+    vehicle_model TEXT,
+    is_online INTEGER DEFAULT 0,
+    current_lat REAL,
+    current_lng REAL,
+    rating REAL DEFAULT 4.5,
+    total_rides INTEGER DEFAULT 0,
+    verified INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users(id)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_rides_customer ON rides(customer_id);
+  CREATE INDEX IF NOT EXISTS idx_rides_rider ON rides(rider_id);
+  CREATE INDEX IF NOT EXISTS idx_rides_status ON rides(status);
+  CREATE INDEX IF NOT EXISTS idx_riders_user ON riders(user_id);
+  CREATE INDEX IF NOT EXISTS idx_riders_online ON riders(is_online, vehicle_type);
+
   -- Promo Cards (editable from admin)
   CREATE TABLE IF NOT EXISTS promo_cards (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

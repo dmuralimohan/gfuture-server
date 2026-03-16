@@ -12,6 +12,7 @@ import adminRoutes from './routes/admin.js';
 import planRoutes from './routes/plans.js';
 import offerRoutes from './routes/offers.js';
 import walletRoutes from './routes/wallet.js';
+import rideRoutes from './routes/rides.js';
 import db from './db.js';
 
 const app = Fastify({ logger: true });
@@ -53,6 +54,7 @@ app.register(adminRoutes, { prefix: '/api/admin' });
 app.register(planRoutes, { prefix: '/api/plans' });
 app.register(offerRoutes, { prefix: '/api/offers' });
 app.register(walletRoutes, { prefix: '/api/wallet' });
+app.register(rideRoutes, { prefix: '/api/rides' });
 
 // Health check
 app.get('/api/health', async () => ({ status: 'ok', timestamp: new Date().toISOString() }));

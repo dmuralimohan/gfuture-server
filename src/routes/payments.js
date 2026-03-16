@@ -1,22 +1,26 @@
 import { v4 as uuidv4 } from 'uuid';
 import crypto from 'crypto';
-import Razorpay from 'razorpay';
 import QRCode from 'qrcode';
 import db from '../db.js';
 
 // Initialize Razorpay instance (Test Mode keys are free)
+// Dynamic import so server doesn't crash if razorpay package isn't installed
 const razorpayKeyId = process.env.RAZORPAY_KEY_ID || '';
 const razorpayKeySecret = process.env.RAZORPAY_KEY_SECRET || '';
 
 let razorpay = null;
 if (razorpayKeyId && razorpayKeySecret) {
-  razorpay = new Razorpay({
-    key_id: razorpayKeyId,
-    key_secret: razorpayKeySecret,
-  });
+  try {
+    const { default: Razorpay } = await import('razorpay');
+    razorpay = new Razorpay({
+      key_id: razorpayKeyId,
+      key_secret: razorpayKeySecret,
+    });
+  } catch {
+    console.warn('⚠️  razorpay package not installed — falling back to UPI QR mode. Run: npm install razorpay');
+  }
 }
 
-// Helper: get full payment + order details for response
 function getPaymentDetails(paymentId) {
   const payment = db.prepare('SELECT * FROM payments WHERE id = ?').get(paymentId);
   if (!payment) return null;
