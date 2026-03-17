@@ -2,6 +2,7 @@ import { join } from 'path';
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import jwt from '@fastify/jwt';
+import websocket from '@fastify/websocket';
 import authRoutes from './routes/auth.js';
 import serviceRoutes from './routes/services.js';
 import orderRoutes from './routes/orders.js';
@@ -13,6 +14,7 @@ import planRoutes from './routes/plans.js';
 import offerRoutes from './routes/offers.js';
 import walletRoutes from './routes/wallet.js';
 import rideRoutes from './routes/rides.js';
+import { addConnection, removeConnection, updateRiderLocation, getConnection } from './ws.js';
 import db from './db.js';
 
 const app = Fastify({ logger: true });
@@ -58,6 +60,117 @@ app.register(rideRoutes, { prefix: '/api/rides' });
 
 // Health check
 app.get('/api/health', async () => ({ status: 'ok', timestamp: new Date().toISOString() }));
+
+// ─── WebSocket ────────────────────────────────────────────────
+await app.register(websocket);
+
+// Helper: verify JWT from query string token
+function verifyWsToken(token) {
+  try {
+    return app.jwt.verify(token);
+  } catch {
+    return null;
+  }
+}
+
+// Rider WebSocket: /ws/rider?token=JWT
+app.get('/ws/rider', { websocket: true }, (socket, req) => {
+  const token = req.query.token;
+  const user = verifyWsToken(token);
+  if (!user) {
+    socket.send(JSON.stringify({ type: 'ERROR', message: 'Unauthorized' }));
+    socket.close();
+    return;
+  }
+
+  // Check rider record exists
+  const rider = db.prepare('SELECT * FROM riders WHERE user_id = ? AND verified = 1').get(user.id);
+  if (!rider) {
+    socket.send(JSON.stringify({ type: 'ERROR', message: 'Not a registered rider' }));
+    socket.close();
+    return;
+  }
+
+  // Register connection
+  addConnection(user.id, socket, 'rider', {
+    lat: rider.current_lat,
+    lng: rider.current_lng,
+    vehicleType: rider.vehicle_type,
+  });
+
+  // Mark rider online in DB
+  db.prepare('UPDATE riders SET is_online = 1, updated_at = datetime(\'now\') WHERE user_id = ?').run(user.id);
+
+  socket.send(JSON.stringify({ type: 'CONNECTED', role: 'rider', userId: user.id }));
+  app.log.info(`Rider WS connected: ${user.id}`);
+
+  socket.on('message', (raw) => {
+    try {
+      const msg = JSON.parse(raw.toString());
+      switch (msg.type) {
+        case 'LOCATION_UPDATE':
+          if (msg.lat != null && msg.lng != null) {
+            updateRiderLocation(user.id, msg.lat, msg.lng);
+            db.prepare('UPDATE riders SET current_lat = ?, current_lng = ?, updated_at = datetime(\'now\') WHERE user_id = ?')
+              .run(msg.lat, msg.lng, user.id);
+          }
+          break;
+        case 'GO_OFFLINE':
+          db.prepare('UPDATE riders SET is_online = 0, updated_at = datetime(\'now\') WHERE user_id = ?').run(user.id);
+          removeConnection(user.id);
+          socket.send(JSON.stringify({ type: 'STATUS', online: false }));
+          break;
+        case 'GO_ONLINE':
+          db.prepare('UPDATE riders SET is_online = 1, updated_at = datetime(\'now\') WHERE user_id = ?').run(user.id);
+          addConnection(user.id, socket, 'rider', {
+            lat: msg.lat || rider.current_lat,
+            lng: msg.lng || rider.current_lng,
+            vehicleType: rider.vehicle_type,
+          });
+          socket.send(JSON.stringify({ type: 'STATUS', online: true }));
+          break;
+        case 'PING':
+          socket.send(JSON.stringify({ type: 'PONG' }));
+          break;
+      }
+    } catch { /* ignore bad messages */ }
+  });
+
+  socket.on('close', () => {
+    db.prepare('UPDATE riders SET is_online = 0, updated_at = datetime(\'now\') WHERE user_id = ?').run(user.id);
+    removeConnection(user.id);
+    app.log.info(`Rider WS disconnected: ${user.id}`);
+  });
+});
+
+// Customer WebSocket: /ws/customer?token=JWT
+app.get('/ws/customer', { websocket: true }, (socket, req) => {
+  const token = req.query.token;
+  const user = verifyWsToken(token);
+  if (!user) {
+    socket.send(JSON.stringify({ type: 'ERROR', message: 'Unauthorized' }));
+    socket.close();
+    return;
+  }
+
+  addConnection(user.id, socket, 'customer');
+  socket.send(JSON.stringify({ type: 'CONNECTED', role: 'customer', userId: user.id }));
+  app.log.info(`Customer WS connected: ${user.id}`);
+
+  socket.on('message', (raw) => {
+    try {
+      const msg = JSON.parse(raw.toString());
+      if (msg.type === 'PING') {
+        socket.send(JSON.stringify({ type: 'PONG' }));
+      }
+    } catch { /* ignore */ }
+  });
+
+  socket.on('close', () => {
+    removeConnection(user.id);
+    app.log.info(`Customer WS disconnected: ${user.id}`);
+  });
+});
 
 // Public settings (for platform fee display on frontend)
 app.get('/api/settings/public', async (request, reply) => {

@@ -1,5 +1,11 @@
 import db from '../db.js';
 import { randomUUID } from 'crypto';
+import {
+    getNearbyOnlineRiders,
+    broadcastRideRequest,
+    notifyRideTaken,
+    sendToUser,
+} from '../ws.js';
 
 // Fare calculation constants
 const BASE_FARE = { bike: 25, auto: 40, car: 80 };
@@ -17,6 +23,256 @@ function generateOtp() {
 }
 
 export default async function rideRoutes(app) {
+
+    // ─── Rider Registration ──────────────────────────────────────
+    app.post('/rider/register', { preHandler: [app.authenticate] }, async (request, reply) => {
+        const userId = request.user.id;
+        const { vehicleType = 'bike', vehicleNumber, vehicleModel } = request.body;
+
+        if (!vehicleNumber || !vehicleModel) {
+            return reply.status(400).send({ message: 'Vehicle number and model are required' });
+        }
+
+        const existing = db.prepare('SELECT * FROM riders WHERE user_id = ?').get(userId);
+        if (existing) {
+            return reply.status(409).send({ message: 'Already registered as rider' });
+        }
+
+        db.prepare(`
+          INSERT INTO riders (user_id, vehicle_type, vehicle_number, vehicle_model, verified)
+          VALUES (?, ?, ?, ?, 1)
+        `).run(userId, vehicleType, vehicleNumber, vehicleModel);
+
+        return reply.status(201).send({ message: 'Rider registered', vehicleType, vehicleNumber, vehicleModel });
+    });
+
+    // ─── Rider Profile ───────────────────────────────────────────
+    app.get('/rider/profile', { preHandler: [app.authenticate] }, async (request, reply) => {
+        const userId = request.user.id;
+        const rider = db.prepare(`
+          SELECT r.*, u.name, u.email, u.phone, u.profile_picture
+          FROM riders r JOIN users u ON r.user_id = u.id
+          WHERE r.user_id = ?
+        `).get(userId);
+
+        if (!rider) {
+            return reply.status(404).send({ message: 'Not registered as rider', registered: false });
+        }
+
+        return {
+            registered: true,
+            rider: {
+                userId: rider.user_id,
+                name: rider.name,
+                email: rider.email,
+                phone: rider.phone,
+                profilePicture: rider.profile_picture,
+                vehicleType: rider.vehicle_type,
+                vehicleNumber: rider.vehicle_number,
+                vehicleModel: rider.vehicle_model,
+                isOnline: !!rider.is_online,
+                rating: rider.rating,
+                totalRides: rider.total_rides,
+                verified: !!rider.verified,
+            },
+        };
+    });
+
+    // ─── Toggle Online/Offline (REST fallback) ───────────────────
+    app.post('/rider/toggle-online', { preHandler: [app.authenticate] }, async (request, reply) => {
+        const userId = request.user.id;
+        const { online, lat, lng } = request.body;
+
+        const rider = db.prepare('SELECT * FROM riders WHERE user_id = ? AND verified = 1').get(userId);
+        if (!rider) return reply.status(404).send({ message: 'Rider not found' });
+
+        db.prepare(`
+          UPDATE riders SET is_online = ?, current_lat = COALESCE(?, current_lat),
+          current_lng = COALESCE(?, current_lng), updated_at = datetime('now')
+          WHERE user_id = ?
+        `).run(online ? 1 : 0, lat || null, lng || null, userId);
+
+        return { message: online ? 'Online' : 'Offline', online: !!online };
+    });
+
+    // ─── Rider: Get Pending Ride Requests ────────────────────────
+    app.get('/rider/requests', { preHandler: [app.authenticate] }, async (request, reply) => {
+        const userId = request.user.id;
+        const rider = db.prepare('SELECT * FROM riders WHERE user_id = ? AND verified = 1').get(userId);
+        if (!rider) return reply.status(404).send({ message: 'Rider not found' });
+
+        // Show rides that are searching and match vehicle type, within ~10km
+        const degPerKm = 0.009;
+        const delta = degPerKm * 10;
+        const lat = rider.current_lat || 17.385;
+        const lng = rider.current_lng || 78.486;
+
+        const rides = db.prepare(`
+          SELECT r.*, u.name as customer_name, u.phone as customer_phone, u.profile_picture as customer_picture
+          FROM rides r JOIN users u ON r.customer_id = u.id
+          WHERE r.status = 'searching' AND r.vehicle_type = ?
+            AND r.pickup_lat BETWEEN ? AND ?
+            AND r.pickup_lng BETWEEN ? AND ?
+          ORDER BY r.created_at DESC LIMIT 10
+        `).all(rider.vehicle_type, lat - delta, lat + delta, lng - delta, lng + delta);
+
+        return {
+            requests: rides.map(r => ({
+                id: r.id,
+                customerName: r.customer_name,
+                customerPhone: r.customer_phone,
+                customerPicture: r.customer_picture,
+                pickupAddress: r.pickup_address,
+                pickupLat: r.pickup_lat,
+                pickupLng: r.pickup_lng,
+                dropAddress: r.drop_address,
+                dropLat: r.drop_lat,
+                dropLng: r.drop_lng,
+                distanceKm: r.distance_km,
+                estimatedFare: r.estimated_fare,
+                vehicleType: r.vehicle_type,
+                createdAt: r.created_at,
+            })),
+        };
+    });
+
+    // ─── Accept Ride (Rider) ─────────────────────────────────────
+    app.post('/:rideId/accept', { preHandler: [app.authenticate] }, async (request, reply) => {
+        const { rideId } = request.params;
+        const userId = request.user.id;
+
+        const rider = db.prepare('SELECT * FROM riders WHERE user_id = ? AND verified = 1').get(userId);
+        if (!rider) return reply.status(403).send({ message: 'Not a verified rider' });
+
+        const ride = db.prepare('SELECT * FROM rides WHERE id = ?').get(rideId);
+        if (!ride) return reply.status(404).send({ message: 'Ride not found' });
+        if (ride.status !== 'searching') {
+            return reply.status(409).send({ message: 'Ride already taken' });
+        }
+
+        // Assign rider
+        db.prepare(`
+          UPDATE rides SET rider_id = ?, status = 'accepted', updated_at = datetime('now')
+          WHERE id = ? AND status = 'searching'
+        `).run(userId, rideId);
+
+        // Verify it was actually updated (race condition check)
+        const updated = db.prepare('SELECT * FROM rides WHERE id = ? AND rider_id = ?').get(rideId, userId);
+        if (!updated) {
+            return reply.status(409).send({ message: 'Ride was taken by another rider' });
+        }
+
+        // Get rider details for customer notification
+        const riderUser = db.prepare('SELECT name, phone, profile_picture FROM users WHERE id = ?').get(userId);
+
+        const riderInfo = {
+            id: userId,
+            name: riderUser.name,
+            phone: riderUser.phone,
+            profilePicture: riderUser.profile_picture,
+            vehicleNumber: rider.vehicle_number,
+            vehicleModel: rider.vehicle_model,
+            rating: rider.rating,
+            totalRides: rider.total_rides,
+        };
+
+        // Notify customer via WebSocket
+        sendToUser(ride.customer_id, 'RIDE_ACCEPTED', {
+            rideId,
+            rider: riderInfo,
+            otp: ride.otp,
+        });
+
+        // Notify other riders that this ride is taken
+        const nearbyRiders = getNearbyOnlineRiders(
+            ride.pickup_lat, ride.pickup_lng, 10, ride.vehicle_type
+        );
+        notifyRideTaken(nearbyRiders.map(r => r.userId), rideId, userId);
+
+        return {
+            message: 'Ride accepted',
+            ride: {
+                id: ride.id,
+                customerName: null, // fetched separately
+                pickupAddress: ride.pickup_address,
+                pickupLat: ride.pickup_lat,
+                pickupLng: ride.pickup_lng,
+                dropAddress: ride.drop_address,
+                dropLat: ride.drop_lat,
+                dropLng: ride.drop_lng,
+                distanceKm: ride.distance_km,
+                estimatedFare: ride.estimated_fare,
+                otp: ride.otp,
+            },
+        };
+    });
+
+    // ─── Rider's Active Ride ─────────────────────────────────────
+    app.get('/rider/active', { preHandler: [app.authenticate] }, async (request, reply) => {
+        const userId = request.user.id;
+        const ride = db.prepare(`
+          SELECT r.*, u.name as customer_name, u.phone as customer_phone, u.profile_picture as customer_picture
+          FROM rides r JOIN users u ON r.customer_id = u.id
+          WHERE r.rider_id = ? AND r.status IN ('accepted', 'arriving', 'in_progress')
+          ORDER BY r.updated_at DESC LIMIT 1
+        `).get(userId);
+
+        if (!ride) return { ride: null };
+
+        return {
+            ride: {
+                id: ride.id,
+                status: ride.status,
+                customerName: ride.customer_name,
+                customerPhone: ride.customer_phone,
+                customerPicture: ride.customer_picture,
+                pickupAddress: ride.pickup_address,
+                pickupLat: ride.pickup_lat,
+                pickupLng: ride.pickup_lng,
+                dropAddress: ride.drop_address,
+                dropLat: ride.drop_lat,
+                dropLng: ride.drop_lng,
+                distanceKm: ride.distance_km,
+                estimatedFare: ride.estimated_fare,
+                otp: ride.otp,
+                vehicleType: ride.vehicle_type,
+            },
+        };
+    });
+
+    // ─── Rider Ride History ──────────────────────────────────────
+    app.get('/rider/history', { preHandler: [app.authenticate] }, async (request, reply) => {
+        const userId = request.user.id;
+        const { page = 1, limit = 20 } = request.query;
+        const offset = (page - 1) * limit;
+
+        const total = db.prepare('SELECT COUNT(*) as count FROM rides WHERE rider_id = ?').get(userId).count;
+        const rides = db.prepare(`
+          SELECT r.*, u.name as customer_name
+          FROM rides r JOIN users u ON r.customer_id = u.id
+          WHERE r.rider_id = ?
+          ORDER BY r.created_at DESC LIMIT ? OFFSET ?
+        `).all(userId, Number(limit), offset);
+
+        return {
+            rides: rides.map(r => ({
+                id: r.id,
+                status: r.status,
+                customerName: r.customer_name,
+                pickupAddress: r.pickup_address,
+                dropAddress: r.drop_address,
+                distanceKm: r.distance_km,
+                estimatedFare: r.estimated_fare,
+                finalFare: r.final_fare,
+                rating: r.rating,
+                createdAt: r.created_at,
+                completedAt: r.completed_at,
+            })),
+            page: Number(page),
+            totalPages: Math.ceil(total / limit),
+            total,
+        };
+    });
     // Estimate fare before booking
     app.post('/estimate', { preHandler: [app.authenticate] }, async (request, reply) => {
         const { vehicleType, distanceKm } = request.body;
@@ -75,8 +331,17 @@ export default async function rideRoutes(app) {
     `).run(rideId, userId, vehicleType, pickupAddress, pickupLat, pickupLng,
             dropAddress, dropLat, dropLng, distanceKm, estimatedFare, otp);
 
-        // Simulate rider assignment after booking (in production, this would be real-time matching)
-        // For demo, auto-assign a mock rider after a short delay concept
+        // Broadcast to nearby online riders via WebSocket
+        const nearbyWsRiders = getNearbyOnlineRiders(pickupLat, pickupLng, 10, vehicleType);
+        const rideRequest = {
+            id: rideId,
+            pickupAddress, pickupLat, pickupLng,
+            dropAddress, dropLat, dropLng,
+            distanceKm, estimatedFare, vehicleType,
+        };
+        const sentCount = broadcastRideRequest(nearbyWsRiders.map(r => r.userId), rideRequest);
+
+        // Also check DB for online riders not connected via WS (REST fallback)
         const onlineRider = db.prepare(
             `SELECT r.*, u.name as rider_name, u.phone as rider_phone, u.profile_picture
        FROM riders r JOIN users u ON r.user_id = u.id
@@ -84,33 +349,19 @@ export default async function rideRoutes(app) {
        LIMIT 1`
         ).get(vehicleType);
 
-        let riderInfo = null;
-        if (onlineRider) {
-            db.prepare(`UPDATE rides SET rider_id = ?, status = 'accepted', updated_at = datetime('now') WHERE id = ?`)
-                .run(onlineRider.user_id, rideId);
-            riderInfo = {
-                id: onlineRider.user_id,
-                name: onlineRider.rider_name,
-                phone: onlineRider.rider_phone,
-                profilePicture: onlineRider.profile_picture,
-                vehicleNumber: onlineRider.vehicle_number,
-                vehicleModel: onlineRider.vehicle_model,
-                rating: onlineRider.rating,
-                totalRides: onlineRider.total_rides,
-            };
-        }
-
         return reply.status(201).send({
             ride: {
                 id: rideId,
-                status: onlineRider ? 'accepted' : 'searching',
+                status: 'searching',
                 vehicleType,
                 pickupAddress,
                 dropAddress,
                 distanceKm,
                 estimatedFare,
                 otp,
-                rider: riderInfo,
+                rider: null,
+                notifiedRiders: sentCount,
+                hasNearbyRiders: sentCount > 0 || !!onlineRider,
             },
         });
     });
@@ -244,6 +495,14 @@ export default async function rideRoutes(app) {
       WHERE id = ?
     `).run(reason || null, userId, rideId);
 
+        // Notify the other party via WebSocket
+        if (ride.customer_id !== userId && ride.customer_id) {
+            sendToUser(ride.customer_id, 'RIDE_CANCELLED', { rideId, cancelledBy: 'rider', reason });
+        }
+        if (ride.rider_id && ride.rider_id !== userId) {
+            sendToUser(ride.rider_id, 'RIDE_CANCELLED', { rideId, cancelledBy: 'customer', reason });
+        }
+
         return { message: 'Ride cancelled', rideId };
     });
 
@@ -265,6 +524,9 @@ export default async function rideRoutes(app) {
       UPDATE rides SET status = 'in_progress', started_at = datetime('now'), updated_at = datetime('now')
       WHERE id = ?
     `).run(rideId);
+
+        // Notify customer ride started
+        sendToUser(ride.customer_id, 'RIDE_STARTED', { rideId });
 
         return { message: 'Ride started', rideId };
     });
@@ -291,6 +553,9 @@ export default async function rideRoutes(app) {
             db.prepare(`UPDATE riders SET total_rides = total_rides + 1, updated_at = datetime('now') WHERE user_id = ?`)
                 .run(ride.rider_id);
         }
+
+        // Notify customer ride completed
+        sendToUser(ride.customer_id, 'RIDE_COMPLETED', { rideId, finalFare });
 
         return { message: 'Ride completed', rideId, finalFare };
     });
