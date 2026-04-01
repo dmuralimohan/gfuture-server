@@ -172,6 +172,35 @@ app.get('/ws/customer', { websocket: true }, (socket, req) => {
   });
 });
 
+// Provider WebSocket: /ws/provider?token=JWT
+app.get('/ws/provider', { websocket: true }, (socket, req) => {
+  const token = req.query.token;
+  const user = verifyWsToken(token);
+  if (!user) {
+    socket.send(JSON.stringify({ type: 'ERROR', message: 'Unauthorized' }));
+    socket.close();
+    return;
+  }
+
+  addConnection(user.id, socket, 'provider');
+  socket.send(JSON.stringify({ type: 'CONNECTED', role: 'provider', userId: user.id }));
+  app.log.info(`Provider WS connected: ${user.id}`);
+
+  socket.on('message', (raw) => {
+    try {
+      const msg = JSON.parse(raw.toString());
+      if (msg.type === 'PING') {
+        socket.send(JSON.stringify({ type: 'PONG' }));
+      }
+    } catch { /* ignore */ }
+  });
+
+  socket.on('close', () => {
+    removeConnection(user.id);
+    app.log.info(`Provider WS disconnected: ${user.id}`);
+  });
+});
+
 // Public settings (for platform fee display on frontend)
 app.get('/api/settings/public', async (request, reply) => {
   const settings = db.prepare('SELECT key, value, label FROM settings').all();

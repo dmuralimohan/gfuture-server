@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import db from '../db.js';
+import { sendToUser } from '../ws.js';
 
 const PLATFORM_FEE_RATE = 0.0102; // 1.02% - default fallback
 
@@ -141,16 +142,21 @@ export default async function orderRoutes(fastify) {
 
     // Attach items to each order
     const getItems = db.prepare(`
-      SELECT oi.*, s.name as service_name
+      SELECT oi.*, s.name as service_name, s.image, s.description
       FROM order_items oi
       LEFT JOIN services s ON oi.service_id = s.id
       WHERE oi.order_id = ?
     `);
 
+    const getMeeting = db.prepare(
+      'SELECT * FROM meeting_requests WHERE order_id = ? ORDER BY id DESC LIMIT 1'
+    );
+
     const enriched = orders.map((o) => ({
       ...o,
       address: o.address ? JSON.parse(o.address) : {},
       items: getItems.all(o.id),
+      meeting: getMeeting.get(o.id) || null,
     }));
 
     return { orders: enriched };
@@ -162,18 +168,28 @@ export default async function orderRoutes(fastify) {
     if (!order) return reply.status(404).send({ message: 'Order not found' });
 
     // Check authorization
-    if (order.customer_id !== request.user.id && request.user.role !== 'admin') {
+    const isProvider = db.prepare(`
+      SELECT 1 FROM order_items oi
+      JOIN services s ON oi.service_id = s.id
+      WHERE oi.order_id = ? AND s.provider_id = ?
+    `).get(order.id, request.user.id);
+
+    if (order.customer_id !== request.user.id && !isProvider && request.user.role !== 'admin') {
       return reply.status(403).send({ message: 'Not authorized' });
     }
 
     const items = db.prepare(`
-      SELECT oi.*, s.name as service_name
+      SELECT oi.*, s.name as service_name, s.image, s.description
       FROM order_items oi
       LEFT JOIN services s ON oi.service_id = s.id
       WHERE oi.order_id = ?
     `).all(order.id);
 
-    return { order: { ...order, address: JSON.parse(order.address || '{}'), items } };
+    const meeting = db.prepare(
+      'SELECT * FROM meeting_requests WHERE order_id = ? ORDER BY id DESC LIMIT 1'
+    ).get(order.id);
+
+    return { order: { ...order, address: JSON.parse(order.address || '{}'), items, meeting: meeting || null } };
   });
 
   // PATCH /api/orders/:id/status — update order status (provider/admin)
@@ -193,5 +209,129 @@ export default async function orderRoutes(fastify) {
 
     const updated = db.prepare('SELECT * FROM orders WHERE id = ?').get(request.params.id);
     return { order: updated };
+  });
+
+  // ─── Meeting-link flow ──────────────────────────────────────
+
+  // POST /api/orders/:id/meeting/request — customer requests a meeting
+  fastify.post('/:id/meeting/request', { preHandler: [fastify.authenticate] }, async (request, reply) => {
+    const orderId = request.params.id;
+    const customerId = request.user.id;
+    const { message } = request.body || {};
+
+    const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
+    if (!order) return reply.status(404).send({ message: 'Order not found' });
+    if (order.customer_id !== customerId) {
+      return reply.status(403).send({ message: 'Not authorized' });
+    }
+
+    // Find the provider for this order from order_items → services → provider_id
+    const providerRow = db.prepare(`
+      SELECT DISTINCT s.provider_id
+      FROM order_items oi
+      JOIN services s ON oi.service_id = s.id
+      WHERE oi.order_id = ? AND s.provider_id IS NOT NULL
+      LIMIT 1
+    `).get(orderId);
+
+    if (!providerRow) {
+      return reply.status(400).send({ message: 'No provider found for this order' });
+    }
+
+    const providerId = providerRow.provider_id;
+
+    // Check if there's already an active meeting request
+    const existing = db.prepare(
+      "SELECT * FROM meeting_requests WHERE order_id = ? AND status IN ('requested', 'link_shared')"
+    ).get(orderId);
+
+    if (existing) {
+      return reply.status(400).send({ message: 'Meeting already requested', meeting: existing });
+    }
+
+    db.prepare(`
+      INSERT INTO meeting_requests (order_id, customer_id, provider_id, status, message)
+      VALUES (?, ?, ?, 'requested', ?)
+    `).run(orderId, customerId, providerId, message || null);
+
+    db.prepare("UPDATE orders SET meeting_requested = 1, updated_at = datetime('now') WHERE id = ?")
+      .run(orderId);
+
+    const meeting = db.prepare(
+      'SELECT * FROM meeting_requests WHERE order_id = ? ORDER BY id DESC LIMIT 1'
+    ).get(orderId);
+
+    // Notify provider via WebSocket
+    const customer = db.prepare('SELECT name FROM users WHERE id = ?').get(customerId);
+    sendToUser(providerId, 'MEETING_REQUESTED', {
+      orderId,
+      meeting,
+      customerName: customer?.name || 'Customer',
+    });
+
+    return reply.status(201).send({ meeting });
+  });
+
+  // POST /api/orders/:id/meeting/link — provider shares meeting link
+  fastify.post('/:id/meeting/link', { preHandler: [fastify.authenticate] }, async (request, reply) => {
+    const orderId = request.params.id;
+    const providerId = request.user.id;
+    const { meeting_link, meeting_time, meeting_date } = request.body;
+
+    if (!meeting_link) {
+      return reply.status(400).send({ message: 'Meeting link is required' });
+    }
+
+    const meeting = db.prepare(
+      "SELECT * FROM meeting_requests WHERE order_id = ? AND provider_id = ? AND status = 'requested'"
+    ).get(orderId, providerId);
+
+    if (!meeting) {
+      return reply.status(404).send({ message: 'No pending meeting request found' });
+    }
+
+    db.prepare(`
+      UPDATE meeting_requests
+      SET meeting_link = ?, meeting_time = ?, meeting_date = ?, status = 'link_shared', updated_at = datetime('now')
+      WHERE id = ?
+    `).run(meeting_link, meeting_time || null, meeting_date || null, meeting.id);
+
+    const updated = db.prepare('SELECT * FROM meeting_requests WHERE id = ?').get(meeting.id);
+
+    // Notify customer via WebSocket
+    const provider = db.prepare('SELECT name FROM users WHERE id = ?').get(providerId);
+    sendToUser(meeting.customer_id, 'MEETING_LINK_SHARED', {
+      orderId,
+      meeting: updated,
+      providerName: provider?.name || 'Provider',
+    });
+
+    return { meeting: updated };
+  });
+
+  // GET /api/orders/:id/meeting — get meeting info for an order
+  fastify.get('/:id/meeting', { preHandler: [fastify.authenticate] }, async (request, reply) => {
+    const orderId = request.params.id;
+    const userId = request.user.id;
+
+    const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
+    if (!order) return reply.status(404).send({ message: 'Order not found' });
+
+    // Allow customer, provider, or admin
+    const isProvider = db.prepare(`
+      SELECT 1 FROM order_items oi
+      JOIN services s ON oi.service_id = s.id
+      WHERE oi.order_id = ? AND s.provider_id = ?
+    `).get(orderId, userId);
+
+    if (order.customer_id !== userId && !isProvider && request.user.role !== 'admin') {
+      return reply.status(403).send({ message: 'Not authorized' });
+    }
+
+    const meeting = db.prepare(
+      'SELECT * FROM meeting_requests WHERE order_id = ? ORDER BY id DESC LIMIT 1'
+    ).get(orderId);
+
+    return { meeting: meeting || null };
   });
 }

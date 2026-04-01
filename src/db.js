@@ -282,6 +282,28 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_riders_user ON riders(user_id);
   CREATE INDEX IF NOT EXISTS idx_riders_online ON riders(is_online, vehicle_type);
 
+  -- Meeting Requests (customer <-> provider)
+  CREATE TABLE IF NOT EXISTS meeting_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id TEXT NOT NULL,
+    customer_id TEXT NOT NULL,
+    provider_id TEXT NOT NULL,
+    status TEXT DEFAULT 'requested',
+    meeting_link TEXT,
+    meeting_time TEXT,
+    meeting_date TEXT,
+    message TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (order_id) REFERENCES orders(id),
+    FOREIGN KEY (customer_id) REFERENCES users(id),
+    FOREIGN KEY (provider_id) REFERENCES users(id)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_meeting_order ON meeting_requests(order_id);
+  CREATE INDEX IF NOT EXISTS idx_meeting_customer ON meeting_requests(customer_id);
+  CREATE INDEX IF NOT EXISTS idx_meeting_provider ON meeting_requests(provider_id);
+
   -- Promo Cards (editable from admin)
   CREATE TABLE IF NOT EXISTS promo_cards (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -310,6 +332,7 @@ const migrations = [
   { table: 'payments', column: 'razorpay_order_id', type: 'TEXT' },
   { table: 'payments', column: 'razorpay_payment_id', type: 'TEXT' },
   { table: 'payments', column: 'razorpay_signature', type: 'TEXT' },
+  { table: 'orders', column: 'meeting_requested', type: 'INTEGER DEFAULT 0' },
 ];
 
 for (const { table, column, type } of migrations) {
