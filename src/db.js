@@ -342,5 +342,35 @@ for (const { table, column, type } of migrations) {
   }
 }
 
+// Course Meetings — one meeting link per course service, shared with all purchasers
+db.exec(`
+  CREATE TABLE IF NOT EXISTS course_meetings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    service_id INTEGER NOT NULL,
+    provider_id TEXT NOT NULL,
+    meeting_link TEXT,
+    meeting_time TEXT,
+    meeting_date TEXT,
+    updated_at TEXT DEFAULT (datetime('now')),
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (service_id) REFERENCES services(id),
+    FOREIGN KEY (provider_id) REFERENCES users(id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_course_meetings_service ON course_meetings(service_id);
+
+  -- Password resets via SMS OTP
+  CREATE TABLE IF NOT EXISTS password_resets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    phone TEXT NOT NULL,
+    otp TEXT NOT NULL,
+    used INTEGER DEFAULT 0,
+    expires_at TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users(id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_password_resets_phone ON password_resets(phone, expires_at);
+`);
+
 export default db;
 

@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import db from '../db.js';
 import { sendToUser } from '../ws.js';
+import { sendMeetingLinkSMS } from '../sms.js';
 
 const PLATFORM_FEE_RATE = 0.0102; // 1.02% - default fallback
 
@@ -333,5 +334,108 @@ export default async function orderRoutes(fastify) {
     ).get(orderId);
 
     return { meeting: meeting || null };
+  });
+
+  // ─── Course Meeting Flow ───────────────────────────────────
+
+  // POST /api/orders/:id/course-meeting — Provider sets/updates course meeting link
+  fastify.post('/:id/course-meeting', { preHandler: [fastify.authenticate] }, async (request, reply) => {
+    const orderId = request.params.id;
+    const providerId = request.user.id;
+    const { meeting_link, meeting_time, meeting_date } = request.body;
+
+    if (!meeting_link || !meeting_link.trim()) {
+      return reply.status(400).send({ message: 'Meeting link is required' });
+    }
+
+    const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
+    if (!order) return reply.status(404).send({ message: 'Order not found' });
+
+    // Get the course service from order items
+    const courseItem = db.prepare(`
+      SELECT s.* FROM order_items oi
+      JOIN services s ON oi.service_id = s.id
+      WHERE oi.order_id = ? AND s.type = 'course' AND s.provider_id = ?
+      LIMIT 1
+    `).get(orderId, providerId);
+
+    if (!courseItem) {
+      return reply.status(400).send({ message: 'No course service found in this order for your account' });
+    }
+
+    // Upsert course_meetings
+    const existing = db.prepare('SELECT * FROM course_meetings WHERE service_id = ?').get(courseItem.id);
+    const linkTrimmed = meeting_link.trim();
+    const timeTrimmed = meeting_time?.trim() || null;
+    const dateTrimmed = meeting_date?.trim() || null;
+    const isUpdate = !!existing;
+
+    if (existing) {
+      db.prepare(`
+        UPDATE course_meetings
+        SET meeting_link = ?, meeting_time = ?, meeting_date = ?, updated_at = datetime('now')
+        WHERE service_id = ?
+      `).run(linkTrimmed, timeTrimmed, dateTrimmed, courseItem.id);
+    } else {
+      db.prepare(`
+        INSERT INTO course_meetings (service_id, provider_id, meeting_link, meeting_time, meeting_date)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(courseItem.id, providerId, linkTrimmed, timeTrimmed, dateTrimmed);
+    }
+
+    const courseMeeting = db.prepare('SELECT * FROM course_meetings WHERE service_id = ?').get(courseItem.id);
+
+    // Find all customers who purchased this course
+    const buyers = db.prepare(`
+      SELECT DISTINCT u.id, u.name, u.phone
+      FROM orders o
+      JOIN order_items oi ON o.id = oi.order_id
+      JOIN users u ON o.customer_id = u.id
+      WHERE oi.service_id = ? AND o.status != 'cancelled'
+    `).all(courseItem.id);
+
+    const providerName = db.prepare('SELECT name FROM users WHERE id = ?').get(providerId)?.name || 'Provider';
+
+    // Notify all buyers via WebSocket + SMS (if link changed)
+    for (const buyer of buyers) {
+      sendToUser(buyer.id, 'COURSE_MEETING_UPDATED', {
+        serviceId: courseItem.id,
+        serviceName: courseItem.name,
+        courseMeeting,
+        providerName,
+      });
+
+      // Send SMS notification
+      if (buyer.phone && isUpdate) {
+        sendMeetingLinkSMS(buyer.phone, courseItem.name, linkTrimmed, timeTrimmed, dateTrimmed)
+          .catch(err => console.error(`[SMS] Failed for ${buyer.id}:`, err));
+      }
+    }
+
+    return { courseMeeting, notifiedCount: buyers.length };
+  });
+
+  // GET /api/orders/:id/course-meeting — Get course meeting for an order
+  fastify.get('/:id/course-meeting', { preHandler: [fastify.authenticate] }, async (request, reply) => {
+    const orderId = request.params.id;
+
+    const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
+    if (!order) return reply.status(404).send({ message: 'Order not found' });
+
+    // Find course service in this order
+    const courseItem = db.prepare(`
+      SELECT s.id, s.name, s.type FROM order_items oi
+      JOIN services s ON oi.service_id = s.id
+      WHERE oi.order_id = ? AND s.type = 'course'
+      LIMIT 1
+    `).get(orderId);
+
+    if (!courseItem) {
+      return { courseMeeting: null, isCourse: false };
+    }
+
+    const courseMeeting = db.prepare('SELECT * FROM course_meetings WHERE service_id = ?').get(courseItem.id);
+
+    return { courseMeeting: courseMeeting || null, isCourse: true, serviceName: courseItem.name };
   });
 }
