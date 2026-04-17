@@ -203,6 +203,77 @@ export default async function authRoutes(fastify) {
     };
   });
 
+  // DELETE /api/auth/account (protected) — permanently delete the authenticated user's account
+  fastify.delete('/account', { preHandler: [fastify.authenticate] }, async (request, reply) => {
+    const { password } = request.body || {};
+
+    if (!password) {
+      return reply.status(400).send({ message: 'Password is required to delete your account' });
+    }
+
+    const userId = request.user.id;
+    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
+    if (!user) {
+      return reply.status(404).send({ message: 'User not found' });
+    }
+
+    const validPassword = await bcrypt.compare(password, user.password);
+    if (!validPassword) {
+      return reply.status(401).send({ message: 'Incorrect password' });
+    }
+
+    db.transaction(() => {
+      // Clean up auth / session data
+      db.prepare('DELETE FROM password_resets WHERE user_id = ?').run(userId);
+      db.prepare('DELETE FROM refresh_tokens WHERE user_id = ?').run(userId);
+
+      // Wallet data
+      db.prepare('DELETE FROM wallet_transactions WHERE user_id = ?').run(userId);
+      db.prepare('DELETE FROM wallets WHERE user_id = ?').run(userId);
+
+      // Plan subscriptions
+      db.prepare('DELETE FROM user_plans WHERE user_id = ?').run(userId);
+
+      // Rider profile
+      db.prepare('DELETE FROM riders WHERE user_id = ?').run(userId);
+
+      // Meetings
+      db.prepare('DELETE FROM meeting_requests WHERE customer_id = ? OR provider_id = ?').run(userId, userId);
+
+      // Course meetings (NOT NULL provider_id — delete rows)
+      db.prepare('DELETE FROM course_meetings WHERE provider_id = ?').run(userId);
+
+      // Rides where user was the customer
+      const customerRideIds = db.prepare('SELECT id FROM rides WHERE customer_id = ?').all(userId).map(r => r.id);
+      if (customerRideIds.length) {
+        const placeholders = customerRideIds.map(() => '?').join(',');
+        db.prepare(`DELETE FROM rides WHERE id IN (${placeholders})`).run(...customerRideIds);
+      }
+      // Rides where user was a rider — nullify rider_id
+      db.prepare("UPDATE rides SET rider_id = NULL WHERE rider_id = ?").run(userId);
+
+      // Orders where user was the customer
+      const customerOrderIds = db.prepare('SELECT id FROM orders WHERE customer_id = ?').all(userId).map(o => o.id);
+      if (customerOrderIds.length) {
+        const placeholders = customerOrderIds.map(() => '?').join(',');
+        db.prepare(`DELETE FROM payments WHERE order_id IN (${placeholders})`).run(...customerOrderIds);
+        db.prepare(`DELETE FROM order_items WHERE order_id IN (${placeholders})`).run(...customerOrderIds);
+        db.prepare(`DELETE FROM orders WHERE id IN (${placeholders})`).run(...customerOrderIds);
+      }
+      // Orders where user was the provider — nullify provider_id
+      db.prepare("UPDATE orders SET provider_id = NULL WHERE provider_id = ?").run(userId);
+
+      // Nullify provider references (preserve the records)
+      db.prepare("UPDATE services SET provider_id = NULL WHERE provider_id = ?").run(userId);
+      db.prepare("UPDATE offers SET provider_id = NULL WHERE provider_id = ?").run(userId);
+
+      // Finally delete the user
+      db.prepare('DELETE FROM users WHERE id = ?').run(userId);
+    })();
+
+    return reply.status(200).send({ message: 'Account deleted successfully' });
+  });
+
   // POST /api/auth/reset-password — verify OTP and set new password
   fastify.post('/reset-password', async (request, reply) => {
     const { phone, otp, newPassword } = request.body;
