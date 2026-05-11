@@ -25,7 +25,7 @@ function sanitizeUser(user) {
 export default async function authRoutes(fastify) {
   // POST /api/auth/signup
   fastify.post('/signup', async (request, reply) => {
-    const { name, email, phone, password, role } = request.body;
+    const { name, email, phone, password, role, designation, experience_years, expertise, bio } = request.body;
 
     if (!name || !email || !phone || !password) {
       return reply.status(400).send({ message: 'All fields are required' });
@@ -45,6 +45,19 @@ export default async function authRoutes(fastify) {
 
     db.prepare('INSERT INTO users (id, name, email, phone, password, role) VALUES (?, ?, ?, ?, ?, ?)')
       .run(userId, name, email, phone, hashedPassword, userRole);
+
+    if (userRole === 'provider') {
+      db.prepare(
+        `INSERT OR IGNORE INTO provider_profiles (user_id, designation, experience_years, expertise, bio)
+         VALUES (?, ?, ?, ?, ?)`
+      ).run(
+        userId,
+        designation || null,
+        Number.isFinite(Number(experience_years)) ? Number(experience_years) : 0,
+        expertise || null,
+        bio || null,
+      );
+    }
 
     const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
     // Initialize wallet with welcome bonus
@@ -130,19 +143,42 @@ export default async function authRoutes(fastify) {
   // GET /api/auth/profile (protected)
   fastify.get('/profile', { preHandler: [fastify.authenticate] }, async (request) => {
     const user = db.prepare('SELECT * FROM users WHERE id = ?').get(request.user.id);
-    return { user: sanitizeUser(user) };
+    const providerProfile = db.prepare('SELECT * FROM provider_profiles WHERE user_id = ?').get(request.user.id) || null;
+    return { user: sanitizeUser(user), providerProfile };
   });
 
   // PUT /api/auth/profile (protected)
   fastify.put('/profile', { preHandler: [fastify.authenticate] }, async (request) => {
-    const { name, phone, profile_picture } = request.body;
+    const { name, phone, profile_picture, designation, experience_years, expertise, bio } = request.body;
     const userId = request.user.id;
 
     db.prepare(`UPDATE users SET name = COALESCE(?, name), phone = COALESCE(?, phone), profile_picture = COALESCE(?, profile_picture), updated_at = datetime('now') WHERE id = ?`)
       .run(name || null, phone || null, profile_picture || null, userId);
 
+    const currentUser = db.prepare('SELECT role FROM users WHERE id = ?').get(userId);
+    if (currentUser?.role === 'provider') {
+      const years = experience_years === '' || experience_years == null ? null : Number(experience_years);
+      db.prepare(
+        `INSERT INTO provider_profiles (user_id, designation, experience_years, expertise, bio, updated_at)
+         VALUES (?, ?, ?, ?, ?, datetime('now'))
+         ON CONFLICT(user_id) DO UPDATE SET
+           designation = COALESCE(excluded.designation, provider_profiles.designation),
+           experience_years = COALESCE(excluded.experience_years, provider_profiles.experience_years),
+           expertise = COALESCE(excluded.expertise, provider_profiles.expertise),
+           bio = COALESCE(excluded.bio, provider_profiles.bio),
+           updated_at = datetime('now')`
+      ).run(
+        userId,
+        designation || null,
+        Number.isFinite(years) ? years : null,
+        expertise || null,
+        bio || null,
+      );
+    }
+
     const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
-    return { user: sanitizeUser(user) };
+    const providerProfile = db.prepare('SELECT * FROM provider_profiles WHERE user_id = ?').get(userId) || null;
+    return { user: sanitizeUser(user), providerProfile };
   });
 
   // POST /api/auth/logout

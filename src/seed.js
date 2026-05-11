@@ -24,7 +24,7 @@ const password = await bcrypt.hash('password123', 12);
 
 const demoUsers = [
   { id: uuidv4(), name: 'Demo Customer', email: 'customer@gfuture.com', phone: '1234567890', role: 'customer' },
-  { id: uuidv4(), name: 'Ravi Kumar', email: 'provider@gfuture.com', phone: '1234567890', role: 'provider' },
+  { id: uuidv4(), name: 'Provider', email: 'provider@gfuture.com', phone: '1234567890', role: 'provider' },
   { id: uuidv4(), name: 'Admin User', email: 'admin@gfuture.com', phone: '1234567890', role: 'admin' },
 ];
 
@@ -34,6 +34,11 @@ demoUsers.forEach((u) => insertUser.run(u.id, u.name, u.email, u.phone, password
 // Get the actual provider ID from DB (may differ from generated uuid if user already existed)
 const providerRow = db.prepare('SELECT id FROM users WHERE email = ?').get('provider@gfuture.com');
 const providerId = providerRow.id;
+
+db.prepare(
+  `INSERT OR IGNORE INTO provider_profiles (user_id, designation, experience_years, expertise, bio)
+   VALUES (?, ?, ?, ?, ?)`
+).run(providerId, 'Senior Service Trainer', 8, 'Home services, customer support, and course delivery', 'Provider profile used for course demos and course authoring.');
 
 // Seed Services (only if table is empty — preserves admin deletions/edits)
 const existingServicesCount = db.prepare('SELECT COUNT(*) as count FROM services').get().count;
@@ -64,6 +69,35 @@ if (existingServicesCount === 0) {
   console.log('  ✅ Services seeded');
 } else {
   console.log('  ⏭️  Services already exist, skipping seed (preserving admin changes)');
+}
+
+const existingCoursesCount = db.prepare('SELECT COUNT(*) as count FROM courses').get().count;
+if (existingCoursesCount === 0) {
+  db.prepare(
+    `INSERT INTO courses (
+      title, description, category_id, provider_id, designation, experience_years,
+      expertise, price, level, duration, meeting_link, meeting_time, meeting_date,
+      active
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    'Home Service Masterclass',
+    'Learn how to run and scale a service business with practical examples, workflow templates, and live mentoring.',
+    1,
+    providerId,
+    'Senior Service Trainer',
+    8,
+    'Business growth, service operations, and customer success',
+    2999,
+    'beginner',
+    '4 weeks',
+    'https://meet.jit.si/gfuture-home-service-masterclass',
+    '6:00 PM',
+    'Every Friday',
+    1,
+  );
+  console.log('  ✅ Courses seeded');
+} else {
+  console.log('  ⏭️  Courses already exist, skipping seed (preserving admin changes)');
 }
 
 // Seed Plans (only if table is empty)

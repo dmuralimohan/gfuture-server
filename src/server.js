@@ -1,11 +1,16 @@
 import { join } from 'path';
+import { mkdirSync, existsSync } from 'fs';
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import jwt from '@fastify/jwt';
 import websocket from '@fastify/websocket';
+import multipart from '@fastify/multipart';
+import staticPlugin from '@fastify/static';
 import authRoutes from './routes/auth.js';
 import serviceRoutes from './routes/services.js';
 import orderRoutes from './routes/orders.js';
+import courseRoutes from './routes/courses.js';
+import notificationRoutes from './routes/notifications.js';
 import categoryRoutes from './routes/categories.js';
 import otpRoutes from './routes/otp.js';
 import paymentRoutes from './routes/payments.js';
@@ -18,6 +23,11 @@ import { addConnection, removeConnection, updateRiderLocation, getConnection } f
 import db from './db.js';
 
 const app = Fastify({ logger: true });
+
+const uploadRoot = join(process.cwd(), 'uploads');
+if (!existsSync(uploadRoot)) {
+  mkdirSync(uploadRoot, { recursive: true });
+}
 
 // CORS — allowed origins from env or defaults
 const allowedOrigins = process.env.CORS_ORIGINS
@@ -32,8 +42,20 @@ await app.register(cors, {
 });
 
 await app.register(jwt, {
-  secret: process.env.JWT_SECRET || 'gfuture-super-secret-key-2026',
+  secret: process.env.JWT_SECRET || 'gfuture_super_secret_key_2026', //@author muralimohand
   sign: { expiresIn: '30m' }, // Access token = 30 minutes
+});
+
+await app.register(multipart, {
+  limits: {
+    fileSize: 500 * 1024 * 1024,
+    files: 2,
+  },
+});
+
+await app.register(staticPlugin, {
+  root: uploadRoot,
+  prefix: '/uploads/',
 });
 
 // Decorators
@@ -49,6 +71,8 @@ app.decorate('authenticate', async (request, reply) => {
 app.register(authRoutes, { prefix: '/api/auth' });
 app.register(serviceRoutes, { prefix: '/api/services' });
 app.register(orderRoutes, { prefix: '/api/orders' });
+app.register(courseRoutes, { prefix: '/api/courses' });
+app.register(notificationRoutes, { prefix: '/api/notifications' });
 app.register(categoryRoutes, { prefix: '/api/categories' });
 app.register(otpRoutes, { prefix: '/api/otp' });
 app.register(paymentRoutes, { prefix: '/api/payments' });

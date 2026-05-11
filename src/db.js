@@ -23,6 +23,17 @@ db.exec(`
     updated_at TEXT DEFAULT (datetime('now'))
   );
 
+  CREATE TABLE IF NOT EXISTS provider_profiles (
+    user_id TEXT PRIMARY KEY,
+    designation TEXT,
+    experience_years INTEGER DEFAULT 0,
+    expertise TEXT,
+    bio TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users(id)
+  );
+
   CREATE TABLE IF NOT EXISTS categories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -319,6 +330,64 @@ db.exec(`
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))
   );
+
+  CREATE TABLE IF NOT EXISTS courses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL,
+    category_id INTEGER,
+    provider_id TEXT NOT NULL,
+    designation TEXT,
+    experience_years INTEGER DEFAULT 0,
+    expertise TEXT,
+    price REAL DEFAULT 0,
+    level TEXT DEFAULT 'beginner',
+    duration TEXT,
+    meeting_link TEXT,
+    meeting_time TEXT,
+    meeting_date TEXT,
+    video_path TEXT,
+    video_name TEXT,
+    video_size INTEGER DEFAULT 0,
+    attachment_path TEXT,
+    attachment_name TEXT,
+    active INTEGER DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (category_id) REFERENCES categories(id),
+    FOREIGN KEY (provider_id) REFERENCES users(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS course_enrollments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    course_id INTEGER NOT NULL,
+    user_id TEXT NOT NULL,
+    subscribed_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(course_id, user_id),
+    FOREIGN KEY (course_id) REFERENCES courses(id),
+    FOREIGN KEY (user_id) REFERENCES users(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS notifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    type TEXT NOT NULL,
+    title TEXT NOT NULL,
+    body TEXT NOT NULL,
+    payload TEXT,
+    read_at TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users(id)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_courses_provider ON courses(provider_id);
+  CREATE INDEX IF NOT EXISTS idx_courses_category ON courses(category_id);
+  CREATE INDEX IF NOT EXISTS idx_courses_active ON courses(active);
+  CREATE INDEX IF NOT EXISTS idx_course_enrollments_course ON course_enrollments(course_id);
+  CREATE INDEX IF NOT EXISTS idx_course_enrollments_user ON course_enrollments(user_id);
+  CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, read_at, created_at);
 `);
 
 // Migrations: add columns that may be missing in older databases
