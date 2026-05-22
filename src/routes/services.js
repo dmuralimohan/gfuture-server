@@ -1,6 +1,20 @@
 import db from '../db.js';
 
 export default async function serviceRoutes(fastify) {
+  const updateServiceReviewSummary = (serviceId) => {
+    const agg = db.prepare(
+      `SELECT COUNT(*) as totalReviews, ROUND(COALESCE(AVG(rating), 0), 1) as avgRating
+       FROM service_reviews
+       WHERE service_id = ?`
+    ).get(serviceId);
+
+    db.prepare(
+      `UPDATE services
+       SET rating = ?, reviews = ?, updated_at = datetime('now')
+       WHERE id = ?`
+    ).run(agg.avgRating || 0, agg.totalReviews || 0, serviceId);
+  };
+
   // GET /api/services — list all services (public)
   fastify.get('/', async (request, reply) => {
     const { category, search, sort, page = 1, limit = 20, provider_id } = request.query;
@@ -70,6 +84,96 @@ export default async function serviceRoutes(fastify) {
 
     service.includes = service.includes ? JSON.parse(service.includes) : [];
     return { service };
+  });
+
+  // GET /api/services/:id/reviews — list reviews for a service (public)
+  fastify.get('/:id/reviews', async (request, reply) => {
+    const serviceId = Number(request.params.id);
+    if (!Number.isFinite(serviceId)) {
+      return reply.status(400).send({ message: 'Invalid service id' });
+    }
+
+    const service = db.prepare('SELECT id FROM services WHERE id = ?').get(serviceId);
+    if (!service) {
+      return reply.status(404).send({ message: 'Service not found' });
+    }
+
+    const reviews = db.prepare(
+      `SELECT r.id, r.rating, r.comment, r.created_at, r.updated_at,
+              u.id as user_id, u.name as user_name
+       FROM service_reviews r
+       LEFT JOIN users u ON u.id = r.user_id
+       WHERE r.service_id = ?
+       ORDER BY r.created_at DESC`
+    ).all(serviceId);
+
+    return {
+      reviews: reviews.map((r) => ({
+        id: r.id,
+        rating: r.rating,
+        comment: r.comment,
+        created_at: r.created_at,
+        updated_at: r.updated_at,
+        user: {
+          id: r.user_id,
+          name: r.user_name || 'User',
+        },
+      })),
+    };
+  });
+
+  // POST /api/services/:id/reviews — add review to a service (authenticated)
+  fastify.post('/:id/reviews', { preHandler: [fastify.authenticate] }, async (request, reply) => {
+    const serviceId = Number(request.params.id);
+    const { rating, comment } = request.body || {};
+    const score = Number(rating);
+    const text = typeof comment === 'string' ? comment.trim() : '';
+
+    if (!Number.isFinite(serviceId)) {
+      return reply.status(400).send({ message: 'Invalid service id' });
+    }
+
+    if (!Number.isFinite(score) || score < 1 || score > 5) {
+      return reply.status(400).send({ message: 'Rating must be between 1 and 5' });
+    }
+
+    if (!text) {
+      return reply.status(400).send({ message: 'Review comment is required' });
+    }
+
+    const service = db.prepare('SELECT id FROM services WHERE id = ?').get(serviceId);
+    if (!service) {
+      return reply.status(404).send({ message: 'Service not found' });
+    }
+
+    const inserted = db.prepare(
+      `INSERT INTO service_reviews (service_id, user_id, rating, comment)
+       VALUES (?, ?, ?, ?)`
+    ).run(serviceId, request.user.id, score, text);
+
+    updateServiceReviewSummary(serviceId);
+
+    const review = db.prepare(
+      `SELECT r.id, r.rating, r.comment, r.created_at, r.updated_at,
+              u.id as user_id, u.name as user_name
+       FROM service_reviews r
+       LEFT JOIN users u ON u.id = r.user_id
+       WHERE r.id = ?`
+    ).get(inserted.lastInsertRowid);
+
+    return reply.status(201).send({
+      review: {
+        id: review.id,
+        rating: review.rating,
+        comment: review.comment,
+        created_at: review.created_at,
+        updated_at: review.updated_at,
+        user: {
+          id: review.user_id,
+          name: review.user_name || 'User',
+        },
+      },
+    });
   });
 
   // POST /api/services — create service (provider only)

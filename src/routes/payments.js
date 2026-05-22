@@ -233,7 +233,13 @@ export default async function paymentRoutes(fastify) {
     }
 
     // ── Razorpay Verification ──
-    if (razorpay_order_id && razorpay_payment_id && razorpay_signature) {
+    if (payment.method === 'razorpay') {
+      if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+        return reply.status(400).send({
+          message: 'Razorpay verification payload required for this payment',
+        });
+      }
+
       if (!razorpayKeySecret) {
         return reply.status(500).send({ message: 'Payment gateway not configured on server' });
       }
@@ -275,6 +281,12 @@ export default async function paymentRoutes(fastify) {
       return { payment: details, message: 'Payment verified successfully' };
     }
 
+    if (payment.method !== 'upi') {
+      return reply.status(400).send({
+        message: `Unsupported manual verification method: ${payment.method || 'unknown'}`,
+      });
+    }
+
     // ── Manual UPI Verification ──
     const txnRef = transactionRef?.trim() || `TXN-${Date.now()}`;
     db.prepare(
@@ -292,22 +304,24 @@ export default async function paymentRoutes(fastify) {
   });
 
   // ─── POST /api/payments/webhook ───
-  fastify.post('/webhook', async (request, reply) => {
+  fastify.post('/webhook', { config: { rawBody: true } }, async (request, reply) => {
     const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET || razorpayKeySecret;
     if (!webhookSecret) {
       return reply.status(500).send({ status: 'not_configured' });
     }
 
-    const receivedSignature = request.headers['x-razorpay-signature'];
-    if (!receivedSignature) {
+    const signatureHeader = request.headers['x-razorpay-signature'];
+    const receivedSignature = Array.isArray(signatureHeader) ? signatureHeader[0] : signatureHeader;
+    if (!receivedSignature || typeof receivedSignature !== 'string') {
       return reply.status(400).send({ status: 'missing_signature' });
     }
 
     let isValid = false;
     try {
+      const rawPayload = request.rawBody || Buffer.from(JSON.stringify(request.body || {}));
       const expectedSignature = crypto
         .createHmac('sha256', webhookSecret)
-        .update(JSON.stringify(request.body))
+        .update(rawPayload)
         .digest('hex');
       isValid = crypto.timingSafeEqual(
         Buffer.from(expectedSignature, 'hex'),

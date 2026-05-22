@@ -65,6 +65,18 @@ db.exec(`
     FOREIGN KEY (provider_id) REFERENCES users(id)
   );
 
+  CREATE TABLE IF NOT EXISTS service_reviews (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    service_id INTEGER NOT NULL,
+    user_id TEXT NOT NULL,
+    rating REAL NOT NULL,
+    comment TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (service_id) REFERENCES services(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+  );
+
   CREATE TABLE IF NOT EXISTS orders (
     id TEXT PRIMARY KEY,
     customer_id TEXT NOT NULL,
@@ -138,6 +150,8 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_services_category ON services(category_id);
   CREATE INDEX IF NOT EXISTS idx_services_provider ON services(provider_id);
   CREATE INDEX IF NOT EXISTS idx_services_active ON services(active);
+  CREATE INDEX IF NOT EXISTS idx_service_reviews_service ON service_reviews(service_id, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_service_reviews_user ON service_reviews(user_id);
   CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items(order_id);
   CREATE INDEX IF NOT EXISTS idx_order_items_service ON order_items(service_id);
   CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);

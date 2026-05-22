@@ -525,6 +525,136 @@ export default async function adminRoutes(fastify) {
     return { payments, total, page: Number(page), totalPages: Math.ceil(total / Number(limit)) };
   });
 
+  // ─── Payments Audit (admin-only) ──────────────────────────
+  fastify.get('/payments/audit', { preHandler: [adminOnly] }, async (request) => {
+    const { days = 30, limit = 25 } = request.query;
+    const daysWindow = Math.max(1, Number(days) || 30);
+    const rowLimit = Math.min(100, Math.max(5, Number(limit) || 25));
+    const sinceExpr = `-${daysWindow} days`;
+
+    const summary = db.prepare(`
+      SELECT
+        COUNT(*) as total_payments,
+        COALESCE(SUM(amount), 0) as total_amount,
+        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_count,
+        COALESCE(SUM(CASE WHEN status = 'completed' THEN amount ELSE 0 END), 0) as completed_amount,
+        SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending_count,
+        COALESCE(SUM(CASE WHEN status = 'pending' THEN amount ELSE 0 END), 0) as pending_amount,
+        SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_count,
+        COALESCE(SUM(CASE WHEN status = 'failed' THEN amount ELSE 0 END), 0) as failed_amount
+      FROM payments
+    `).get();
+
+    const recentTrend = db.prepare(`
+      SELECT
+        DATE(created_at) as date,
+        COUNT(*) as total,
+        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+        SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
+        SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
+        COALESCE(SUM(CASE WHEN status = 'completed' THEN amount ELSE 0 END), 0) as completed_amount
+      FROM payments
+      WHERE created_at >= datetime('now', ?)
+      GROUP BY DATE(created_at)
+      ORDER BY date ASC
+    `).all(sinceExpr);
+
+    const orphanPayments = db.prepare(`
+      SELECT
+        p.id,
+        p.order_id,
+        p.amount,
+        p.status,
+        p.method,
+        p.created_at,
+        'orphan_payment' as issue,
+        'high' as severity,
+        'Payment references missing order' as reason
+      FROM payments p
+      LEFT JOIN orders o ON o.id = p.order_id
+      WHERE o.id IS NULL
+      ORDER BY p.created_at DESC
+      LIMIT ?
+    `).all(rowLimit);
+
+    const completedWithoutPaidAt = db.prepare(`
+      SELECT
+        p.id,
+        p.order_id,
+        p.amount,
+        p.status,
+        p.method,
+        p.created_at,
+        'completed_without_paid_at' as issue,
+        'medium' as severity,
+        'Completed payment missing paid_at timestamp' as reason
+      FROM payments p
+      WHERE p.status = 'completed' AND p.paid_at IS NULL
+      ORDER BY p.created_at DESC
+      LIMIT ?
+    `).all(rowLimit);
+
+    const completedRazorpayMissingRefs = db.prepare(`
+      SELECT
+        p.id,
+        p.order_id,
+        p.amount,
+        p.status,
+        p.method,
+        p.created_at,
+        'completed_razorpay_missing_refs' as issue,
+        'high' as severity,
+        'Completed Razorpay payment missing order/payment reference' as reason
+      FROM payments p
+      WHERE p.method = 'razorpay'
+        AND p.status = 'completed'
+        AND (p.razorpay_order_id IS NULL OR p.razorpay_payment_id IS NULL)
+      ORDER BY p.created_at DESC
+      LIMIT ?
+    `).all(rowLimit);
+
+    const orderStatusMismatch = db.prepare(`
+      SELECT
+        p.id,
+        p.order_id,
+        p.amount,
+        p.status,
+        p.method,
+        p.created_at,
+        'payment_order_status_mismatch' as issue,
+        'high' as severity,
+        'Completed payment linked to non-confirmed/completed order' as reason
+      FROM payments p
+      JOIN orders o ON o.id = p.order_id
+      WHERE p.status = 'completed'
+        AND o.status NOT IN ('confirmed', 'completed')
+      ORDER BY p.created_at DESC
+      LIMIT ?
+    `).all(rowLimit);
+
+    const anomalies = [
+      ...orphanPayments,
+      ...completedWithoutPaidAt,
+      ...completedRazorpayMissingRefs,
+      ...orderStatusMismatch,
+    ]
+      .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+      .slice(0, rowLimit);
+
+    return {
+      summary,
+      issues: {
+        orphan_payments: orphanPayments.length,
+        completed_without_paid_at: completedWithoutPaidAt.length,
+        completed_razorpay_missing_refs: completedRazorpayMissingRefs.length,
+        payment_order_status_mismatch: orderStatusMismatch.length,
+      },
+      recentTrend,
+      anomalies,
+      filters: { days: daysWindow, limit: rowLimit },
+    };
+  });
+
   // ─── Plans Management (Admin) ──────────────────────────────
 
   // GET all plans (admin view — include inactive)

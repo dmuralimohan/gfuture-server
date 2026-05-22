@@ -6,6 +6,7 @@ import jwt from '@fastify/jwt';
 import websocket from '@fastify/websocket';
 import multipart from '@fastify/multipart';
 import staticPlugin from '@fastify/static';
+import rawBody from 'fastify-raw-body';
 import authRoutes from './routes/auth.js';
 import serviceRoutes from './routes/services.js';
 import orderRoutes from './routes/orders.js';
@@ -56,6 +57,13 @@ await app.register(multipart, {
 await app.register(staticPlugin, {
   root: uploadRoot,
   prefix: '/uploads/',
+});
+
+await app.register(rawBody, {
+  field: 'rawBody',
+  global: false,
+  encoding: false,
+  runFirst: true,
 });
 
 // Decorators
