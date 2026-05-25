@@ -7,6 +7,7 @@ import db from '../db.js';
 // Dynamic import so server doesn't crash if razorpay package isn't installed
 const razorpayKeyId = process.env.RAZORPAY_KEY_ID || '';
 const razorpayKeySecret = process.env.RAZORPAY_KEY_SECRET || '';
+const MIN_RAZORPAY_AMOUNT_PAISE = 100;
 
 let razorpay = null;
 if (razorpayKeyId && razorpayKeySecret) {
@@ -40,7 +41,106 @@ function getPaymentDetails(paymentId) {
   };
 }
 
+function createPaymentAlert({
+  type,
+  severity = 'medium',
+  source = 'system',
+  paymentId = null,
+  orderId = null,
+  message,
+  metadata = null,
+  fingerprint,
+}) {
+  const baseFingerprint = fingerprint || `${type}|${paymentId || ''}|${orderId || ''}|${message}`;
+  const safeFingerprint = crypto.createHash('sha256').update(baseFingerprint).digest('hex');
+
+  db.prepare(
+    `INSERT OR IGNORE INTO payment_alerts
+     (id, type, severity, source, payment_id, order_id, message, metadata, fingerprint)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    uuidv4(),
+    type,
+    severity,
+    source,
+    paymentId,
+    orderId,
+    message,
+    metadata ? JSON.stringify(metadata) : null,
+    safeFingerprint
+  );
+}
+
 export default async function paymentRoutes(fastify) {
+
+  // ─── POST /api/payments/create-order ───
+  // Standard Razorpay order creation endpoint for web/mobile clients.
+  fastify.post('/create-order', { preHandler: [fastify.authenticate] }, async (request, reply) => {
+    const body = request.body || {};
+    const amount = Number(body.amount);
+    const currency = body.currency || 'INR';
+    const receipt = body.receipt || `rcpt_${Date.now()}`;
+
+    if (!Number.isFinite(amount) || amount < MIN_RAZORPAY_AMOUNT_PAISE) {
+      return reply.status(400).send({ message: `Amount must be at least ${MIN_RAZORPAY_AMOUNT_PAISE} paise` });
+    }
+
+    if (!razorpay) {
+      return reply.status(500).send({ message: 'Payment gateway not configured on server' });
+    }
+
+    try {
+      const rzpOrder = await razorpay.orders.create({
+        amount: Math.round(amount),
+        currency,
+        receipt,
+      });
+
+      return {
+        order_id: rzpOrder.id,
+        amount: rzpOrder.amount,
+        currency: rzpOrder.currency,
+      };
+    } catch (err) {
+      const statusCode = err?.statusCode || err?.status || err?.error?.status_code;
+      if (statusCode === 401) {
+        return reply.status(401).send({ message: 'Razorpay authentication failed' });
+      }
+      fastify.log.error('Razorpay create-order failed:', err);
+      return reply.status(500).send({ message: 'Failed to create Razorpay order' });
+    }
+  });
+
+  // ─── POST /api/payments/verify-payment ───
+  fastify.post('/verify-payment', { preHandler: [fastify.authenticate] }, async (request, reply) => {
+    const body = request.body || {};
+    const orderId = body.razorpay_order_id || body.order_id;
+    const paymentId = body.razorpay_payment_id || body.payment_id;
+    const signature = body.razorpay_signature || body.signature;
+
+    if (!orderId || !paymentId || !signature) {
+      return reply.status(400).send({ message: 'order_id, payment_id and razorpay_signature are required' });
+    }
+
+    if (!razorpayKeySecret) {
+      return reply.status(500).send({ message: 'Payment gateway not configured on server' });
+    }
+
+    const expectedSignature = crypto
+      .createHmac('sha256', razorpayKeySecret)
+      .update(`${orderId}|${paymentId}`)
+      .digest('hex');
+
+    const signaturesMatch =
+      expectedSignature.length === signature.length
+      && crypto.timingSafeEqual(Buffer.from(expectedSignature), Buffer.from(signature));
+
+    if (!signaturesMatch) {
+      return reply.status(400).send({ message: 'Signature mismatch' });
+    }
+
+    return { success: true, message: 'Payment signature verified successfully' };
+  });
 
   // ─── POST /api/payments/initiate ───
   fastify.post('/initiate', { preHandler: [fastify.authenticate] }, async (request, reply) => {
@@ -94,6 +194,11 @@ export default async function paymentRoutes(fastify) {
     // ── Razorpay Mode ──
     if (razorpay) {
       try {
+        const amountPaise = Math.round(Number(order.total || 0) * 100);
+        if (amountPaise < MIN_RAZORPAY_AMOUNT_PAISE) {
+          return reply.status(400).send({ message: `Order total must be at least ${MIN_RAZORPAY_AMOUNT_PAISE} paise` });
+        }
+
         // Reuse existing pending Razorpay order
         if (existing?.razorpay_order_id && existing.status === 'pending') {
           return {
@@ -115,7 +220,7 @@ export default async function paymentRoutes(fastify) {
 
         // Create Razorpay order
         const rzpOrder = await razorpay.orders.create({
-          amount: Math.round(order.total * 100),
+          amount: amountPaise,
           currency: 'INR',
           receipt: `rcpt_${orderId.substring(0, 20)}`,
           payment_capture: 1, // auto-capture payments
@@ -246,6 +351,18 @@ export default async function paymentRoutes(fastify) {
 
       // Validate razorpay_order_id matches what we stored
       if (payment.razorpay_order_id && payment.razorpay_order_id !== razorpay_order_id) {
+        createPaymentAlert({
+          type: 'verify_order_id_mismatch',
+          severity: 'high',
+          source: 'verify',
+          paymentId,
+          orderId: payment.order_id,
+          message: 'Razorpay order ID mismatch in verify request',
+          metadata: {
+            expected_razorpay_order_id: payment.razorpay_order_id,
+            received_razorpay_order_id: razorpay_order_id,
+          },
+        });
         return reply.status(400).send({ message: 'Razorpay order ID mismatch' });
       }
 
@@ -254,10 +371,22 @@ export default async function paymentRoutes(fastify) {
         .update(`${razorpay_order_id}|${razorpay_payment_id}`)
         .digest('hex');
 
-      if (!crypto.timingSafeEqual(Buffer.from(expectedSignature, 'hex'), Buffer.from(razorpay_signature, 'hex'))) {
+      const signaturesMatch =
+        expectedSignature.length === razorpay_signature.length
+        && crypto.timingSafeEqual(Buffer.from(expectedSignature), Buffer.from(razorpay_signature));
+
+      if (!signaturesMatch) {
         db.prepare(
           `UPDATE payments SET status = 'failed', updated_at = datetime('now') WHERE id = ?`
         ).run(paymentId);
+        createPaymentAlert({
+          type: 'verify_signature_invalid',
+          severity: 'high',
+          source: 'verify',
+          paymentId,
+          orderId: payment.order_id,
+          message: 'Invalid Razorpay signature during payment verify',
+        });
         return reply.status(400).send({ message: 'Payment verification failed — invalid signature. Please contact support.' });
       }
 
@@ -305,14 +434,26 @@ export default async function paymentRoutes(fastify) {
 
   // ─── POST /api/payments/webhook ───
   fastify.post('/webhook', { config: { rawBody: true } }, async (request, reply) => {
-    const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET || razorpayKeySecret;
+    const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET;
     if (!webhookSecret) {
+      createPaymentAlert({
+        type: 'webhook_secret_missing',
+        severity: 'critical',
+        source: 'webhook',
+        message: 'Webhook called but RAZORPAY_WEBHOOK_SECRET is missing on server',
+      });
       return reply.status(500).send({ status: 'not_configured' });
     }
 
     const signatureHeader = request.headers['x-razorpay-signature'];
     const receivedSignature = Array.isArray(signatureHeader) ? signatureHeader[0] : signatureHeader;
     if (!receivedSignature || typeof receivedSignature !== 'string') {
+      createPaymentAlert({
+        type: 'webhook_missing_signature',
+        severity: 'high',
+        source: 'webhook',
+        message: 'Razorpay webhook missing signature header',
+      });
       return reply.status(400).send({ status: 'missing_signature' });
     }
 
@@ -333,6 +474,12 @@ export default async function paymentRoutes(fastify) {
 
     if (!isValid) {
       fastify.log.warn('Invalid Razorpay webhook signature');
+      createPaymentAlert({
+        type: 'webhook_invalid_signature',
+        severity: 'high',
+        source: 'webhook',
+        message: 'Invalid Razorpay webhook signature',
+      });
       return reply.status(400).send({ status: 'invalid_signature' });
     }
 
@@ -340,14 +487,64 @@ export default async function paymentRoutes(fastify) {
     const payload = request.body?.payload;
 
     if (!event || !payload) {
+      createPaymentAlert({
+        type: 'webhook_malformed_payload',
+        severity: 'high',
+        source: 'webhook',
+        message: 'Razorpay webhook payload missing event or payload object',
+      });
       return reply.status(400).send({ status: 'malformed_payload' });
     }
 
     if (event === 'payment.captured') {
       const rzpPayment = payload.payment?.entity;
-      if (!rzpPayment?.order_id) return { status: 'ok' };
+      if (!rzpPayment?.order_id) {
+        createPaymentAlert({
+          type: 'webhook_capture_missing_order_id',
+          severity: 'high',
+          source: 'webhook',
+          message: 'payment.captured webhook missing Razorpay order_id',
+          metadata: { event },
+        });
+        return { status: 'ok' };
+      }
 
       const payment = db.prepare('SELECT * FROM payments WHERE razorpay_order_id = ?').get(rzpPayment.order_id);
+      if (!payment) {
+        createPaymentAlert({
+          type: 'webhook_orphan_capture',
+          severity: 'high',
+          source: 'webhook',
+          message: 'payment.captured received for unknown Razorpay order',
+          metadata: {
+            razorpay_order_id: rzpPayment.order_id,
+            razorpay_payment_id: rzpPayment.id,
+          },
+          fingerprint: `orphan_capture|${rzpPayment.order_id}|${rzpPayment.id || ''}`,
+        });
+        return { status: 'ok' };
+      }
+
+      const expectedAmountPaise = Math.round(Number(payment.amount || 0) * 100);
+      const receivedAmountPaise = Number(rzpPayment.amount || 0);
+      if (expectedAmountPaise !== receivedAmountPaise) {
+        createPaymentAlert({
+          type: 'payment_amount_mismatch',
+          severity: 'high',
+          source: 'webhook',
+          paymentId: payment.id,
+          orderId: payment.order_id,
+          message: 'Captured amount does not match local payment amount',
+          metadata: {
+            expected_amount_paise: expectedAmountPaise,
+            received_amount_paise: receivedAmountPaise,
+            razorpay_order_id: rzpPayment.order_id,
+            razorpay_payment_id: rzpPayment.id,
+          },
+          fingerprint: `amount_mismatch|${payment.id}|${rzpPayment.id || ''}|${expectedAmountPaise}|${receivedAmountPaise}`,
+        });
+      }
+
       if (payment && payment.status !== 'completed') {
         db.prepare(
           `UPDATE payments 
@@ -370,13 +567,37 @@ export default async function paymentRoutes(fastify) {
 
     if (event === 'payment.failed') {
       const rzpPayment = payload.payment?.entity;
-      if (!rzpPayment?.order_id) return { status: 'ok' };
+      if (!rzpPayment?.order_id) {
+        createPaymentAlert({
+          type: 'webhook_failed_missing_order_id',
+          severity: 'medium',
+          source: 'webhook',
+          message: 'payment.failed webhook missing Razorpay order_id',
+          metadata: { event },
+        });
+        return { status: 'ok' };
+      }
 
       const payment = db.prepare('SELECT * FROM payments WHERE razorpay_order_id = ?').get(rzpPayment.order_id);
       if (payment && payment.status === 'pending') {
         db.prepare(
           `UPDATE payments SET status = 'failed', updated_at = datetime('now') WHERE id = ?`
         ).run(payment.id);
+        createPaymentAlert({
+          type: 'payment_failed_webhook',
+          severity: 'medium',
+          source: 'webhook',
+          paymentId: payment.id,
+          orderId: payment.order_id,
+          message: 'Razorpay reported payment.failed for pending payment',
+          metadata: {
+            razorpay_order_id: rzpPayment.order_id,
+            razorpay_payment_id: rzpPayment.id,
+            error_code: rzpPayment.error_code,
+            error_description: rzpPayment.error_description,
+          },
+          fingerprint: `payment_failed|${payment.id}|${rzpPayment.id || ''}`,
+        });
         fastify.log.info(`Webhook: Payment ${payment.id} failed`);
       }
     }

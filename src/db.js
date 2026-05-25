@@ -141,8 +141,28 @@ db.exec(`
     FOREIGN KEY (order_id) REFERENCES orders(id)
   );
 
+  CREATE TABLE IF NOT EXISTS payment_alerts (
+    id TEXT PRIMARY KEY,
+    type TEXT NOT NULL,
+    severity TEXT NOT NULL DEFAULT 'medium',
+    source TEXT NOT NULL DEFAULT 'system',
+    payment_id TEXT,
+    order_id TEXT,
+    message TEXT NOT NULL,
+    metadata TEXT,
+    fingerprint TEXT,
+    resolved INTEGER NOT NULL DEFAULT 0,
+    resolved_at TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (payment_id) REFERENCES payments(id),
+    FOREIGN KEY (order_id) REFERENCES orders(id)
+  );
+
   CREATE INDEX IF NOT EXISTS idx_otp_phone ON otp_verifications(phone, expires_at);
   CREATE INDEX IF NOT EXISTS idx_payment_order ON payments(order_id);
+  CREATE INDEX IF NOT EXISTS idx_payment_alerts_created ON payment_alerts(created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_payment_alerts_resolved ON payment_alerts(resolved, severity, created_at DESC);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_alerts_fingerprint ON payment_alerts(fingerprint);
   CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id);
   CREATE INDEX IF NOT EXISTS idx_orders_provider ON orders(provider_id);
   CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);

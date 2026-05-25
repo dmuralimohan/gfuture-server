@@ -641,6 +641,25 @@ export default async function adminRoutes(fastify) {
       .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
       .slice(0, rowLimit);
 
+    const alertSummary = db.prepare(`
+      SELECT
+        SUM(CASE WHEN resolved = 0 THEN 1 ELSE 0 END) as open_total,
+        SUM(CASE WHEN resolved = 0 AND severity = 'critical' THEN 1 ELSE 0 END) as open_critical,
+        SUM(CASE WHEN resolved = 0 AND severity = 'high' THEN 1 ELSE 0 END) as open_high,
+        SUM(CASE WHEN resolved = 0 AND severity = 'medium' THEN 1 ELSE 0 END) as open_medium,
+        SUM(CASE WHEN resolved = 0 AND severity = 'low' THEN 1 ELSE 0 END) as open_low
+      FROM payment_alerts
+      WHERE created_at >= datetime('now', ?)
+    `).get(sinceExpr);
+
+    const recentAlerts = db.prepare(`
+      SELECT id, type, severity, source, payment_id, order_id, message, resolved, created_at
+      FROM payment_alerts
+      WHERE created_at >= datetime('now', ?)
+      ORDER BY created_at DESC
+      LIMIT ?
+    `).all(sinceExpr, rowLimit);
+
     return {
       summary,
       issues: {
@@ -651,8 +670,72 @@ export default async function adminRoutes(fastify) {
       },
       recentTrend,
       anomalies,
+      alertSummary,
+      recentAlerts,
       filters: { days: daysWindow, limit: rowLimit },
     };
+  });
+
+  // ─── Payment Alerts (admin-only) ──────────────────────────
+  fastify.get('/payments/alerts', { preHandler: [adminOnly] }, async (request) => {
+    const { status = 'open', severity, type, page = 1, limit = 25 } = request.query;
+    const rowLimit = Math.min(100, Math.max(5, Number(limit) || 25));
+    const offset = (Number(page) - 1) * rowLimit;
+    let where = 'WHERE 1=1';
+    const params = [];
+
+    if (status === 'open') {
+      where += ' AND resolved = 0';
+    } else if (status === 'resolved') {
+      where += ' AND resolved = 1';
+    }
+
+    if (severity) {
+      where += ' AND severity = ?';
+      params.push(severity);
+    }
+
+    if (type) {
+      where += ' AND type = ?';
+      params.push(type);
+    }
+
+    const total = db.prepare(`SELECT COUNT(*) as count FROM payment_alerts ${where}`).get(...params).count;
+    const alerts = db.prepare(`
+      SELECT id, type, severity, source, payment_id, order_id, message, metadata, resolved, resolved_at, created_at
+      FROM payment_alerts
+      ${where}
+      ORDER BY resolved ASC, created_at DESC
+      LIMIT ? OFFSET ?
+    `).all(...params, rowLimit, offset);
+
+    const parsed = alerts.map((a) => ({
+      ...a,
+      metadata: a.metadata ? JSON.parse(a.metadata) : null,
+    }));
+
+    return {
+      alerts: parsed,
+      total,
+      page: Number(page),
+      totalPages: Math.ceil(total / rowLimit),
+    };
+  });
+
+  fastify.patch('/payments/alerts/:id/resolve', { preHandler: [adminOnly] }, async (request, reply) => {
+    const alert = db.prepare('SELECT id FROM payment_alerts WHERE id = ?').get(request.params.id);
+    if (!alert) {
+      return reply.status(404).send({ message: 'Alert not found' });
+    }
+
+    db.prepare(`
+      UPDATE payment_alerts
+      SET resolved = 1,
+          resolved_at = datetime('now')
+      WHERE id = ?
+    `).run(request.params.id);
+
+    return { message: 'Alert marked as resolved' };
   });
 
   // ─── Plans Management (Admin) ──────────────────────────────
