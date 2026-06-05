@@ -7,9 +7,9 @@ const db = new Database('/Users/murali-15351/project/client2/server/gfuture.db')
 const password = hashSync('password123', 10);
 
 const riderData = [
-    { name: 'Raju Kumar', email: 'rider.bike@demo.com', phone: '9876543210', vehicleType: 'bike', vehicleNumber: 'TS09AB1234', vehicleModel: 'Honda Activa', lat: 17.385, lng: 78.486, rating: 4.8, rides: 120 },
-    { name: 'Suresh Reddy', email: 'rider.auto@demo.com', phone: '9876543211', vehicleType: 'auto', vehicleNumber: 'TS09CX5678', vehicleModel: 'Bajaj Auto', lat: 17.39, lng: 78.49, rating: 4.6, rides: 85 },
-    { name: 'Venkat Rao', email: 'rider.car@demo.com', phone: '9876543212', vehicleType: 'car', vehicleNumber: 'TS09DZ9012', vehicleModel: 'Maruti Swift Dzire', lat: 17.38, lng: 78.48, rating: 4.9, rides: 200 },
+    { name: 'Raju Kumar', email: 'rider.bike@demo.com', phone: '0123456789', vehicleType: 'bike', vehicleNumber: 'TS09AB1234', vehicleModel: 'Honda Activa', lat: 17.385, lng: 78.486, rating: 4.8, rides: 120 },
+    { name: 'Suresh Reddy', email: 'rider.auto@demo.com', phone: '0123456789', vehicleType: 'auto', vehicleNumber: 'TS09CX5678', vehicleModel: 'Bajaj Auto', lat: 17.39, lng: 78.49, rating: 4.6, rides: 85 },
+    { name: 'Venkat Rao', email: 'rider.car@demo.com', phone: '0123456789', vehicleType: 'car', vehicleNumber: 'TS09DZ9012', vehicleModel: 'Maruti Swift Dzire', lat: 17.38, lng: 78.48, rating: 4.9, rides: 200 },
 ];
 
 for (const r of riderData) {
