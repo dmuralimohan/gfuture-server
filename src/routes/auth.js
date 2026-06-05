@@ -31,20 +31,45 @@ export default async function authRoutes(fastify) {
       return reply.status(400).send({ message: 'All fields are required' });
     }
 
+    const normalizedEmail = String(email).trim().toLowerCase();
+    const cleanPhone = String(phone).replace(/\D/g, '');
+
+    if (cleanPhone.length < 10) {
+      return reply.status(400).send({ message: 'Valid phone number is required' });
+    }
+
     const validRoles = ['customer', 'provider'];
     const userRole = validRoles.includes(role) ? role : 'customer';
 
     // Check existing
-    const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(email);
+    const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(normalizedEmail);
     if (existing) {
       return reply.status(409).send({ message: 'Email already registered' });
+    }
+
+    const existingPhone = db.prepare('SELECT id FROM users WHERE phone = ?').get(cleanPhone);
+    if (existingPhone) {
+      return reply.status(409).send({ message: 'Phone number already registered' });
+    }
+
+    const otpVerified = db.prepare(
+      `SELECT id FROM otp_verifications
+       WHERE phone = ? AND verified = 1 AND expires_at > datetime('now')
+       ORDER BY created_at DESC LIMIT 1`
+    ).get(cleanPhone);
+
+    if (!otpVerified) {
+      return reply.status(400).send({ message: 'Phone OTP verification required before signup' });
     }
 
     const hashedPassword = await bcrypt.hash(password, 12);
     const userId = uuidv4();
 
     db.prepare('INSERT INTO users (id, name, email, phone, password, role) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(userId, name, email, phone, hashedPassword, userRole);
+      .run(userId, name, normalizedEmail, cleanPhone, hashedPassword, userRole);
+
+    // Consume OTP proof so each verification can only be used once for signup.
+    db.prepare('DELETE FROM otp_verifications WHERE phone = ?').run(cleanPhone);
 
     if (userRole === 'provider') {
       db.prepare(

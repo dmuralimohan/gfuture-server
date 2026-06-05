@@ -34,7 +34,9 @@ async function getClient() {
 
 function formatPhone(phone) {
     const clean = phone.replace(/\D/g, '');
-    return clean.startsWith('+') ? clean : `+91${clean}`;
+    if (clean.length === 10) return `+91${clean}`;
+    if (clean.length > 10) return `+${clean}`;
+    return null;
 }
 
 /**
@@ -46,6 +48,11 @@ function formatPhone(phone) {
 export async function sendSMS(to, body) {
     const client = await getClient();
     const from = process.env.TWILIO_PHONE_NUMBER;
+    const toPhone = formatPhone(to);
+
+    if (!toPhone) {
+        return { success: false, error: 'Invalid destination phone number' };
+    }
 
     if (!client || !from) {
         console.log(`[SMS-DEV] To: ${to} | Body: ${body}`);
@@ -56,7 +63,7 @@ export async function sendSMS(to, body) {
         const msg = await client.messages.create({
             body,
             from,
-            to: formatPhone(to),
+            to: toPhone,
         });
         return { success: true, sid: msg.sid };
     } catch (err) {

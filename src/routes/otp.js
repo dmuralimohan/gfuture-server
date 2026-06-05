@@ -22,6 +22,13 @@ function generateOTP() {
   return crypto.randomInt(100000, 999999).toString();
 }
 
+function toE164(phoneDigits) {
+  if (!phoneDigits) return null;
+  if (phoneDigits.length === 10) return `+91${phoneDigits}`;
+  if (phoneDigits.length > 10) return `+${phoneDigits}`;
+  return null;
+}
+
 export default async function otpRoutes(fastify) {
   // POST /api/otp/send — Send OTP to phone number
   fastify.post('/send', async (request, reply) => {
@@ -60,7 +67,10 @@ export default async function otpRoutes(fastify) {
 
     if (client && twilioPhone) {
       try {
-        const toNumber = cleanPhone.startsWith('+') ? cleanPhone : `+91${cleanPhone}`;
+        const toNumber = toE164(cleanPhone);
+        if (!toNumber) {
+          return reply.status(400).send({ message: 'Invalid phone number format for OTP' });
+        }
         await client.messages.create({
           body: `Your G-Future verification code is: ${otp}. Valid for 5 minutes. Do not share.`,
           from: twilioPhone,
@@ -118,7 +128,7 @@ export default async function otpRoutes(fastify) {
 
     // Clean up old OTPs for this phone
     db.prepare(
-      `DELETE FROM otp_verifications WHERE phone = ? AND (verified = 1 OR expires_at < datetime('now'))`
+      `DELETE FROM otp_verifications WHERE phone = ? AND expires_at < datetime('now')`
     ).run(cleanPhone);
 
     return {
