@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { join } from 'path';
 import { mkdirSync, existsSync } from 'fs';
 import Fastify from 'fastify';
