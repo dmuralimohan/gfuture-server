@@ -257,9 +257,25 @@ db.exec(`
     FOREIGN KEY (user_id) REFERENCES users(id)
   );
 
+  CREATE TABLE IF NOT EXISTS wallet_topups (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    amount REAL NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    razorpay_order_id TEXT NOT NULL UNIQUE,
+    razorpay_payment_id TEXT,
+    razorpay_signature TEXT,
+    completed_at TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users(id)
+  );
+
   CREATE INDEX IF NOT EXISTS idx_wallets_user ON wallets(user_id);
   CREATE INDEX IF NOT EXISTS idx_wallet_txn_user ON wallet_transactions(user_id);
   CREATE INDEX IF NOT EXISTS idx_wallet_txn_type ON wallet_transactions(type);
+  CREATE INDEX IF NOT EXISTS idx_wallet_topups_user ON wallet_topups(user_id, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_wallet_topups_status ON wallet_topups(status, created_at DESC);
 
   -- Platform Settings
   CREATE TABLE IF NOT EXISTS settings (

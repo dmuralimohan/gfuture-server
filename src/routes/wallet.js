@@ -1,4 +1,24 @@
+import { v4 as uuidv4 } from 'uuid';
+import crypto from 'crypto';
 import db from '../db.js';
+
+const razorpayKeyId = process.env.RAZORPAY_KEY_ID || '';
+const razorpayKeySecret = process.env.RAZORPAY_KEY_SECRET || '';
+const MIN_TOPUP_AMOUNT = 1;
+const MIN_TOPUP_AMOUNT_PAISE = 100;
+
+let razorpay = null;
+if (razorpayKeyId && razorpayKeySecret) {
+    try {
+        const { default: Razorpay } = await import('razorpay');
+        razorpay = new Razorpay({
+            key_id: razorpayKeyId,
+            key_secret: razorpayKeySecret,
+        });
+    } catch {
+        console.warn('⚠️ razorpay package not installed — wallet top-up via Razorpay is disabled.');
+    }
+}
 
 // Ensure wallet exists for a user
 function ensureWallet(userId) {
@@ -64,11 +84,15 @@ export default async function walletRoutes(fastify) {
         };
     });
 
-    // POST /api/wallet/add-funds — add money to wallet
+    // POST /api/wallet/add-funds — legacy direct top-up route (disabled by default)
     fastify.post('/add-funds', { preHandler: [fastify.authenticate] }, async (request, reply) => {
-        const { amount } = request.body;
+        const { amount } = request.body || {};
         if (!amount || amount <= 0) {
             return reply.status(400).send({ message: 'Valid amount is required' });
+        }
+
+        if (process.env.ALLOW_DIRECT_WALLET_CREDIT !== 'true') {
+            return reply.status(400).send({ message: 'Direct wallet credit is disabled. Use Razorpay wallet top-up.' });
         }
 
         const result = addTransaction(request.user.id, {
@@ -79,6 +103,184 @@ export default async function walletRoutes(fastify) {
         });
 
         return { wallet: result, message: 'Funds added successfully' };
+    });
+
+    // POST /api/wallet/topup/initiate — create Razorpay order for wallet top-up
+    fastify.post('/topup/initiate', { preHandler: [fastify.authenticate] }, async (request, reply) => {
+        const { amount } = request.body || {};
+        const topupAmount = Number(amount);
+
+        if (!Number.isFinite(topupAmount) || topupAmount < MIN_TOPUP_AMOUNT) {
+            return reply.status(400).send({ message: `Minimum top-up amount is ₹${MIN_TOPUP_AMOUNT}` });
+        }
+
+        if (!razorpay) {
+            return reply.status(500).send({ message: 'Payment gateway not configured on server' });
+        }
+
+        const amountPaise = Math.round(topupAmount * 100);
+        if (amountPaise < MIN_TOPUP_AMOUNT_PAISE) {
+            return reply.status(400).send({ message: `Amount must be at least ${MIN_TOPUP_AMOUNT_PAISE} paise` });
+        }
+
+        try {
+            const topupId = uuidv4();
+            const rzpOrder = await razorpay.orders.create({
+                amount: amountPaise,
+                currency: 'INR',
+                receipt: `wallet_${topupId.substring(0, 20)}`,
+                payment_capture: 1,
+                notes: {
+                    walletTopupId: topupId,
+                    userId: request.user.id,
+                },
+            });
+
+            db.prepare(
+                `INSERT INTO wallet_topups (id, user_id, amount, status, razorpay_order_id)
+                 VALUES (?, ?, ?, 'pending', ?)`
+            ).run(topupId, request.user.id, topupAmount, rzpOrder.id);
+
+            const customer = db.prepare('SELECT name, email, phone FROM users WHERE id = ?').get(request.user.id);
+
+            return {
+                topup: {
+                    id: topupId,
+                    amount: topupAmount,
+                    status: 'pending',
+                    razorpayOrderId: rzpOrder.id,
+                    razorpayKeyId,
+                    customerName: customer?.name || '',
+                    customerEmail: customer?.email || '',
+                    customerPhone: customer?.phone || '',
+                },
+            };
+        } catch (err) {
+            fastify.log.error('Wallet Razorpay top-up initiate failed:', err);
+            return reply.status(500).send({ message: 'Failed to initiate wallet top-up' });
+        }
+    });
+
+    // POST /api/wallet/topup/verify — verify Razorpay signature and credit wallet once
+    fastify.post('/topup/verify', { preHandler: [fastify.authenticate] }, async (request, reply) => {
+        const {
+            topupId,
+            razorpay_order_id: razorpayOrderId,
+            razorpay_payment_id: razorpayPaymentId,
+            razorpay_signature: razorpaySignature,
+        } = request.body || {};
+
+        if (!topupId || !razorpayOrderId || !razorpayPaymentId || !razorpaySignature) {
+            return reply.status(400).send({ message: 'topupId, razorpay_order_id, razorpay_payment_id and razorpay_signature are required' });
+        }
+
+        if (!razorpayKeySecret) {
+            return reply.status(500).send({ message: 'Payment gateway not configured on server' });
+        }
+
+        const topup = db.prepare('SELECT * FROM wallet_topups WHERE id = ?').get(topupId);
+        if (!topup) {
+            return reply.status(404).send({ message: 'Wallet top-up not found' });
+        }
+        if (topup.user_id !== request.user.id) {
+            return reply.status(403).send({ message: 'Not authorized' });
+        }
+
+        if (topup.status === 'completed') {
+            return {
+                success: true,
+                wallet: ensureWallet(request.user.id),
+                message: 'Wallet top-up already verified',
+            };
+        }
+
+        if (topup.razorpay_order_id !== razorpayOrderId) {
+            return reply.status(400).send({ message: 'Razorpay order mismatch' });
+        }
+
+        const expectedSignature = crypto
+            .createHmac('sha256', razorpayKeySecret)
+            .update(`${razorpayOrderId}|${razorpayPaymentId}`)
+            .digest('hex');
+
+        const signaturesMatch =
+            expectedSignature.length === razorpaySignature.length
+            && crypto.timingSafeEqual(Buffer.from(expectedSignature), Buffer.from(razorpaySignature));
+
+        if (!signaturesMatch) {
+            db.prepare(
+                `UPDATE wallet_topups SET status = 'failed', razorpay_payment_id = ?, razorpay_signature = ?, updated_at = datetime('now') WHERE id = ?`
+            ).run(razorpayPaymentId, razorpaySignature, topupId);
+            return reply.status(400).send({ message: 'Signature mismatch' });
+        }
+
+        db.prepare('BEGIN').run();
+        try {
+            const latestTopup = db.prepare('SELECT * FROM wallet_topups WHERE id = ?').get(topupId);
+            if (latestTopup.status === 'completed') {
+                db.prepare('COMMIT').run();
+                return {
+                    success: true,
+                    wallet: ensureWallet(request.user.id),
+                    message: 'Wallet top-up already verified',
+                };
+            }
+
+            const result = addTransaction(request.user.id, {
+                type: 'top_up',
+                amount: Number(latestTopup.amount),
+                description: `Added ₹${Number(latestTopup.amount).toFixed(2)} to wallet via Razorpay`,
+                referenceType: 'wallet_topup',
+                referenceId: topupId,
+            });
+
+            db.prepare(
+                `UPDATE wallet_topups
+                 SET status = 'completed', razorpay_payment_id = ?, razorpay_signature = ?, completed_at = datetime('now'), updated_at = datetime('now')
+                 WHERE id = ?`
+            ).run(razorpayPaymentId, razorpaySignature, topupId);
+
+            db.prepare('COMMIT').run();
+            return {
+                success: true,
+                wallet: result,
+                topup: {
+                    id: topupId,
+                    status: 'completed',
+                    amount: Number(latestTopup.amount),
+                },
+                message: 'Wallet top-up successful',
+            };
+        } catch (err) {
+            db.prepare('ROLLBACK').run();
+            fastify.log.error('Wallet Razorpay top-up verify failed:', err);
+            return reply.status(500).send({ message: 'Failed to verify wallet top-up' });
+        }
+    });
+
+    // GET /api/wallet/topup/:id — fetch top-up status
+    fastify.get('/topup/:id', { preHandler: [fastify.authenticate] }, async (request, reply) => {
+        const { id } = request.params;
+        const topup = db.prepare(
+            `SELECT id, amount, status, razorpay_order_id, razorpay_payment_id, completed_at, created_at
+             FROM wallet_topups WHERE id = ? AND user_id = ?`
+        ).get(id, request.user.id);
+
+        if (!topup) {
+            return reply.status(404).send({ message: 'Wallet top-up not found' });
+        }
+
+        return {
+            topup: {
+                id: topup.id,
+                amount: Number(topup.amount),
+                status: topup.status,
+                razorpayOrderId: topup.razorpay_order_id,
+                razorpayPaymentId: topup.razorpay_payment_id,
+                completedAt: topup.completed_at,
+                createdAt: topup.created_at,
+            },
+        };
     });
 
     // POST /api/wallet/redeem-credits — convert credit points to wallet balance
