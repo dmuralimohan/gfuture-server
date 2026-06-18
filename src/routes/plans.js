@@ -59,6 +59,12 @@ export default async function planRoutes(fastify) {
         const plan = db.prepare('SELECT * FROM plans WHERE id = ? AND active = 1').get(plan_id);
         if (!plan) return reply.status(404).send({ message: 'Plan not found or inactive' });
 
+        // Referral bonus is only for first-time plan-only signups.
+        const priorPlanCount = db
+            .prepare('SELECT COUNT(*) as count FROM user_plans WHERE user_id = ?')
+            .get(request.user.id)?.count || 0;
+        const isFirstPlanSubscription = Number(priorPlanCount) === 0;
+
         // Deactivate any existing active plans for this user
         db.prepare(
             "UPDATE user_plans SET status = 'cancelled' WHERE user_id = ? AND status = 'active'"
@@ -91,7 +97,7 @@ export default async function planRoutes(fastify) {
             const planAmount = Number(plan.price || 0);
             const rewardAmount = Math.round(planAmount * 0.1 * 100) / 100;
 
-            if (subscriber?.referred_by_user_id && !subscriber.referral_rewarded_at && rewardAmount > 0) {
+            if (subscriber?.referred_by_user_id && !subscriber.referral_rewarded_at && rewardAmount > 0 && isFirstPlanSubscription) {
                 const applyReferralReward = db.transaction(() => {
                     const latestSubscriber = db
                         .prepare('SELECT id, name, referred_by_user_id, referral_rewarded_at FROM users WHERE id = ?')
