@@ -1,4 +1,6 @@
 import db from '../db.js';
+import { v4 as uuidv4 } from 'uuid';
+import { addTransaction } from './wallet.js';
 
 export default async function planRoutes(fastify) {
     // ─── Public: GET /api/plans — list all active plans ─────────
@@ -79,6 +81,63 @@ export default async function planRoutes(fastify) {
             .get(result.lastInsertRowid);
 
         subscription.features = subscription.features ? JSON.parse(subscription.features) : [];
+
+        // One-time referral reward: referrer gets 10% of the referred user's subscribed plan amount.
+        try {
+            const subscriber = db
+                .prepare('SELECT id, name, referred_by_user_id, referral_rewarded_at FROM users WHERE id = ?')
+                .get(request.user.id);
+
+            const planAmount = Number(plan.price || 0);
+            const rewardAmount = Math.round(planAmount * 0.1 * 100) / 100;
+
+            if (subscriber?.referred_by_user_id && !subscriber.referral_rewarded_at && rewardAmount > 0) {
+                const applyReferralReward = db.transaction(() => {
+                    const latestSubscriber = db
+                        .prepare('SELECT id, name, referred_by_user_id, referral_rewarded_at FROM users WHERE id = ?')
+                        .get(subscriber.id);
+
+                    if (!latestSubscriber?.referred_by_user_id || latestSubscriber.referral_rewarded_at) {
+                        return;
+                    }
+
+                    const existingReward = db
+                        .prepare('SELECT id FROM referral_rewards WHERE referred_user_id = ?')
+                        .get(latestSubscriber.id);
+
+                    if (existingReward) {
+                        db.prepare("UPDATE users SET referral_rewarded_at = datetime('now') WHERE id = ?").run(latestSubscriber.id);
+                        return;
+                    }
+
+                    addTransaction(latestSubscriber.referred_by_user_id, {
+                        type: 'referral_bonus',
+                        amount: rewardAmount,
+                        description: `Referral bonus from ${latestSubscriber.name}'s ${plan.name} plan`,
+                        referenceType: 'referral_plan',
+                        referenceId: latestSubscriber.id,
+                    });
+
+                    db.prepare(
+                        `INSERT INTO referral_rewards (id, referrer_user_id, referred_user_id, plan_id, plan_amount, reward_amount)
+                         VALUES (?, ?, ?, ?, ?, ?)`
+                    ).run(
+                        uuidv4(),
+                        latestSubscriber.referred_by_user_id,
+                        latestSubscriber.id,
+                        plan.id,
+                        planAmount,
+                        rewardAmount,
+                    );
+
+                    db.prepare("UPDATE users SET referral_rewarded_at = datetime('now') WHERE id = ?").run(latestSubscriber.id);
+                });
+
+                applyReferralReward();
+            }
+        } catch (err) {
+            fastify.log.error('Referral reward processing failed:', err);
+        }
 
         return reply.status(201).send({ subscription, message: 'Plan subscribed successfully' });
     });

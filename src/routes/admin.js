@@ -1,6 +1,22 @@
 import db from '../db.js';
 import bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
+import crypto from 'crypto';
+
+function referralSeed(value = '') {
+  return String(value).toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4).padEnd(4, 'X');
+}
+
+function generateUniqueReferralCode(seed = 'GFUT') {
+  for (let i = 0; i < 20; i++) {
+    const suffix = crypto.randomBytes(4).toString('hex').toUpperCase().slice(0, 6);
+    const code = `${referralSeed(seed)}${suffix}`;
+    const exists = db.prepare('SELECT id FROM users WHERE referral_code = ?').get(code);
+    if (!exists) return code;
+  }
+
+  return `${referralSeed(seed)}${Date.now().toString(36).toUpperCase().slice(-6)}`;
+}
 
 function requireAdmin(fastify) {
   return async (request, reply) => {
@@ -20,8 +36,14 @@ export default async function adminRoutes(fastify) {
       SELECT
         COUNT(*) as totalUsers,
         SUM(CASE WHEN role = 'customer' THEN 1 ELSE 0 END) as totalCustomers,
-        SUM(CASE WHEN role = 'provider' THEN 1 ELSE 0 END) as totalProviders
+        SUM(CASE WHEN role = 'provider' THEN 1 ELSE 0 END) as totalProviders,
+        SUM(CASE WHEN referred_by_user_id IS NOT NULL THEN 1 ELSE 0 END) as totalReferralJoins
       FROM users
+    `).get();
+
+    const referralPayout = db.prepare(`
+      SELECT COALESCE(SUM(reward_amount), 0) as totalReferralPayout
+      FROM referral_rewards
     `).get();
 
     const orderStats = db.prepare(`
@@ -51,6 +73,7 @@ export default async function adminRoutes(fastify) {
 
     return {
       ...userStats,
+      ...referralPayout,
       ...orderStats,
       totalServices,
       recentOrders,
@@ -136,7 +159,7 @@ export default async function adminRoutes(fastify) {
 
     const total = db.prepare(`SELECT COUNT(*) as count FROM users ${where}`).get(...params).count;
     const users = db.prepare(`
-      SELECT id, name, email, phone, role, created_at, updated_at
+      SELECT id, name, email, phone, role, referral_code, created_at, updated_at
       FROM users ${where}
       ORDER BY created_at DESC
       LIMIT ? OFFSET ?
@@ -151,11 +174,21 @@ export default async function adminRoutes(fastify) {
         FROM orders WHERE customer_id IN (${placeholders})
         GROUP BY customer_id
       `).all(...userIds);
+
+      const referralStats = db.prepare(`
+        SELECT referred_by_user_id as referrer_id, COUNT(*) as referred_users_count
+        FROM users
+        WHERE referred_by_user_id IN (${placeholders})
+        GROUP BY referred_by_user_id
+      `).all(...userIds);
+
       const statsMap = Object.fromEntries(orderStats.map(s => [s.customer_id, s]));
+      const referralMap = Object.fromEntries(referralStats.map(s => [s.referrer_id, s.referred_users_count]));
       var enriched = users.map(u => ({
         ...u,
         order_count: statsMap[u.id]?.order_count || 0,
         total_spent: statsMap[u.id]?.total_spent || 0,
+        referred_users_count: referralMap[u.id] || 0,
       }));
     } else {
       var enriched = [];
@@ -166,7 +199,7 @@ export default async function adminRoutes(fastify) {
 
   // GET single user
   fastify.get('/users/:id', { preHandler: [adminOnly] }, async (request, reply) => {
-    const user = db.prepare('SELECT id, name, email, phone, role, created_at, updated_at FROM users WHERE id = ?').get(request.params.id);
+    const user = db.prepare('SELECT id, name, email, phone, role, referral_code, referred_by_user_id, created_at, updated_at FROM users WHERE id = ?').get(request.params.id);
     if (!user) return reply.status(404).send({ message: 'User not found' });
 
     const orders = db.prepare(`
@@ -177,7 +210,13 @@ export default async function adminRoutes(fastify) {
       SELECT * FROM services WHERE provider_id = ?
     `).all(user.id);
 
-    return { user, orders, services };
+    const referralSummary = db.prepare(`
+      SELECT
+        (SELECT COUNT(*) FROM users WHERE referred_by_user_id = ?) as referred_users_count,
+        COALESCE((SELECT SUM(reward_amount) FROM referral_rewards WHERE referrer_user_id = ?), 0) as referral_earned
+    `).get(user.id, user.id);
+
+    return { user, orders, services, referralSummary };
   });
 
   // POST create user
@@ -191,11 +230,13 @@ export default async function adminRoutes(fastify) {
 
     const hashedPassword = await bcrypt.hash(password, 12);
     const userId = uuidv4();
+    const referralCode = generateUniqueReferralCode(name || email);
     const validRoles = ['customer', 'provider', 'admin'];
     const userRole = validRoles.includes(role) ? role : 'customer';
 
-    db.prepare('INSERT INTO users (id, name, email, phone, password, role) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(userId, name, email, phone, hashedPassword, userRole);
+    db.prepare(
+      'INSERT INTO users (id, name, email, phone, password, role, referral_code, is_email_verified) VALUES (?, ?, ?, ?, ?, ?, ?, 1)'
+    ).run(userId, name, email, phone, hashedPassword, userRole, referralCode);
 
     const user = db.prepare('SELECT id, name, email, phone, role, created_at FROM users WHERE id = ?').get(userId);
     return reply.status(201).send({ user });

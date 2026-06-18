@@ -22,10 +22,39 @@ function sanitizeUser(user) {
   return safe;
 }
 
+function referralSeed(value = '') {
+  return String(value).toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4).padEnd(4, 'X');
+}
+
+function randomReferralSuffix() {
+  return crypto.randomBytes(4).toString('hex').toUpperCase().slice(0, 6);
+}
+
+function generateUniqueReferralCode(seed = 'GFUT') {
+  for (let i = 0; i < 20; i++) {
+    const code = `${referralSeed(seed)}${randomReferralSuffix()}`;
+    const exists = db.prepare('SELECT id FROM users WHERE referral_code = ?').get(code);
+    if (!exists) return code;
+  }
+
+  return `${referralSeed(seed)}${Date.now().toString(36).toUpperCase().slice(-6)}`;
+}
+
 export default async function authRoutes(fastify) {
   // POST /api/auth/signup
   fastify.post('/signup', async (request, reply) => {
-    const { name, email, phone, password, role, designation, experience_years, expertise, bio } = request.body;
+    const {
+      name,
+      email,
+      phone,
+      password,
+      role,
+      designation,
+      experience_years,
+      expertise,
+      bio,
+      referralCode,
+    } = request.body;
 
     if (!name || !email || !phone || !password) {
       return reply.status(400).send({ message: 'All fields are required' });
@@ -40,6 +69,15 @@ export default async function authRoutes(fastify) {
 
     const validRoles = ['customer', 'provider'];
     const userRole = validRoles.includes(role) ? role : 'customer';
+
+    const normalizedReferralCode = referralCode ? String(referralCode).trim().toUpperCase() : '';
+    let referrer = null;
+    if (normalizedReferralCode) {
+      referrer = db.prepare('SELECT id FROM users WHERE referral_code = ?').get(normalizedReferralCode) || null;
+      if (!referrer) {
+        return reply.status(400).send({ message: 'Invalid referral code' });
+      }
+    }
 
     // Check existing
     const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(normalizedEmail);
@@ -64,9 +102,22 @@ export default async function authRoutes(fastify) {
 
     const hashedPassword = await bcrypt.hash(password, 12);
     const userId = uuidv4();
+    const generatedReferralCode = generateUniqueReferralCode(name || normalizedEmail);
 
-    db.prepare('INSERT INTO users (id, name, email, phone, password, role) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(userId, name, normalizedEmail, cleanPhone, hashedPassword, userRole);
+    db.prepare(
+      `INSERT INTO users
+       (id, name, email, phone, password, role, referral_code, referred_by_user_id, is_email_verified)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`
+    ).run(
+      userId,
+      name,
+      normalizedEmail,
+      cleanPhone,
+      hashedPassword,
+      userRole,
+      generatedReferralCode,
+      referrer?.id || null,
+    );
 
     // Consume OTP proof so each verification can only be used once for signup.
     db.prepare('DELETE FROM otp_verifications WHERE phone = ?').run(cleanPhone);
@@ -109,7 +160,8 @@ export default async function authRoutes(fastify) {
       return reply.status(400).send({ message: 'Email and password are required' });
     }
 
-    const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+    const normalizedEmail = String(email).trim().toLowerCase();
+    const user = db.prepare('SELECT * FROM users WHERE email = ?').get(normalizedEmail);
     if (!user) {
       return reply.status(401).send({ message: 'Invalid email or password' });
     }

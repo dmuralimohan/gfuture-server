@@ -443,6 +443,10 @@ db.exec(`
 // Migrations: add columns that may be missing in older databases
 const migrations = [
   { table: 'users', column: 'profile_picture', type: 'TEXT' },
+  { table: 'users', column: 'referral_code', type: 'TEXT' },
+  { table: 'users', column: 'referred_by_user_id', type: 'TEXT' },
+  { table: 'users', column: 'referral_rewarded_at', type: 'TEXT' },
+  { table: 'users', column: 'is_email_verified', type: 'INTEGER NOT NULL DEFAULT 1' },
   { table: 'orders', column: 'discount_amount', type: 'REAL DEFAULT 0' },
   { table: 'orders', column: 'coupon_code', type: 'TEXT' },
   { table: 'services', column: 'type', type: "TEXT NOT NULL DEFAULT 'service'" },
@@ -459,6 +463,61 @@ for (const { table, column, type } of migrations) {
   if (!columns.some(c => c.name === column)) {
     db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
   }
+}
+
+db.exec(`
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_users_referral_code_unique
+  ON users(referral_code)
+  WHERE referral_code IS NOT NULL;
+
+  CREATE INDEX IF NOT EXISTS idx_users_referred_by
+  ON users(referred_by_user_id);
+
+  CREATE TABLE IF NOT EXISTS referral_rewards (
+    id TEXT PRIMARY KEY,
+    referrer_user_id TEXT NOT NULL,
+    referred_user_id TEXT NOT NULL,
+    plan_id INTEGER,
+    plan_amount REAL NOT NULL DEFAULT 0,
+    reward_amount REAL NOT NULL DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (referrer_user_id) REFERENCES users(id),
+    FOREIGN KEY (referred_user_id) REFERENCES users(id),
+    FOREIGN KEY (plan_id) REFERENCES plans(id),
+    UNIQUE(referred_user_id)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_referral_rewards_referrer
+  ON referral_rewards(referrer_user_id, created_at DESC);
+`);
+
+function referralToken(input = '') {
+  const cleaned = String(input).toUpperCase().replace(/[^A-Z0-9]/g, '');
+  return cleaned.slice(0, 4).padEnd(4, 'X');
+}
+
+function randomSuffix() {
+  return Math.random().toString(36).toUpperCase().replace(/[^A-Z0-9]/g, '').slice(2, 8);
+}
+
+function generateUniqueReferralCode(seed = 'GFUT') {
+  for (let i = 0; i < 20; i++) {
+    const code = `${referralToken(seed)}${randomSuffix()}`;
+    const exists = db.prepare('SELECT id FROM users WHERE referral_code = ?').get(code);
+    if (!exists) return code;
+  }
+
+  return `${referralToken(seed)}${Date.now().toString(36).toUpperCase().slice(-6)}`;
+}
+
+const usersWithoutReferral = db
+  .prepare("SELECT id, name, email FROM users WHERE referral_code IS NULL OR trim(referral_code) = ''")
+  .all();
+
+for (const user of usersWithoutReferral) {
+  const seed = user.name || user.email || 'GFUT';
+  const referralCode = generateUniqueReferralCode(seed);
+  db.prepare('UPDATE users SET referral_code = ? WHERE id = ?').run(referralCode, user.id);
 }
 
 // Course Meetings — one meeting link per course service, shared with all purchasers
