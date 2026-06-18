@@ -275,9 +275,39 @@ export default async function adminRoutes(fastify) {
     if (user.role === 'admin') return reply.status(400).send({ message: 'Cannot delete admin users' });
 
     const deleteUser = db.transaction((userId) => {
+      // Referral links and rewards referencing this user
+      db.prepare('UPDATE users SET referred_by_user_id = NULL WHERE referred_by_user_id = ?').run(userId);
+      db.prepare('DELETE FROM referral_rewards WHERE referrer_user_id = ? OR referred_user_id = ?').run(userId, userId);
+
+      // Auth/session/OTP/reset data
+      db.prepare('DELETE FROM refresh_tokens WHERE user_id = ?').run(userId);
+      db.prepare('DELETE FROM otp_verifications WHERE phone = (SELECT phone FROM users WHERE id = ?)').run(userId);
+      db.prepare('DELETE FROM password_resets WHERE user_id = ?').run(userId);
+
+      // Wallet data
+      db.prepare('DELETE FROM wallet_transactions WHERE user_id = ?').run(userId);
+      db.prepare('DELETE FROM wallet_topups WHERE user_id = ?').run(userId);
+      db.prepare('DELETE FROM wallets WHERE user_id = ?').run(userId);
+
+      // Notifications, subscriptions, rider profile
+      db.prepare('DELETE FROM notifications WHERE user_id = ?').run(userId);
+      db.prepare('DELETE FROM user_plans WHERE user_id = ?').run(userId);
+      db.prepare('DELETE FROM riders WHERE user_id = ?').run(userId);
+      db.prepare('DELETE FROM service_reviews WHERE user_id = ?').run(userId);
+
+      // Meetings and provider profile
+      db.prepare('DELETE FROM meeting_requests WHERE customer_id = ? OR provider_id = ?').run(userId, userId);
+      db.prepare('DELETE FROM provider_profiles WHERE user_id = ?').run(userId);
+
+      // Rides where user was customer are removed; where user was rider, detach rider
+      db.prepare('DELETE FROM rides WHERE customer_id = ?').run(userId);
+      db.prepare('UPDATE rides SET rider_id = NULL WHERE rider_id = ?').run(userId);
+
       // Delete order_items and payments for user's orders (as customer)
       const orderIds = db.prepare('SELECT id FROM orders WHERE customer_id = ?').all(userId).map(o => o.id);
       for (const orderId of orderIds) {
+        db.prepare('DELETE FROM payment_alerts WHERE order_id = ?').run(orderId);
+        db.prepare('DELETE FROM payment_alerts WHERE payment_id IN (SELECT id FROM payments WHERE order_id = ?)').run(orderId);
         db.prepare('DELETE FROM order_items WHERE order_id = ?').run(orderId);
         db.prepare('DELETE FROM payments WHERE order_id = ?').run(orderId);
       }
@@ -288,14 +318,23 @@ export default async function adminRoutes(fastify) {
       db.prepare('UPDATE services SET provider_id = NULL WHERE provider_id = ?').run(userId);
       db.prepare('UPDATE offers SET provider_id = NULL WHERE provider_id = ?').run(userId);
 
-      // Clean up user-specific records
-      db.prepare('DELETE FROM user_plans WHERE user_id = ?').run(userId);
-      db.prepare('DELETE FROM refresh_tokens WHERE user_id = ?').run(userId);
+      // Course data references
+      db.prepare('DELETE FROM course_enrollments WHERE user_id = ?').run(userId);
+      db.prepare('DELETE FROM course_enrollments WHERE course_id IN (SELECT id FROM courses WHERE provider_id = ?)').run(userId);
+      db.prepare('DELETE FROM course_meetings WHERE provider_id = ?').run(userId);
+      db.prepare('DELETE FROM courses WHERE provider_id = ?').run(userId);
+
+      // Finally delete the user
       db.prepare('DELETE FROM users WHERE id = ?').run(userId);
     });
 
-    deleteUser(request.params.id);
-    return { message: 'User deleted successfully' };
+    try {
+      deleteUser(request.params.id);
+      return { message: 'User deleted successfully' };
+    } catch (error) {
+      request.log.error({ err: error, userId: request.params.id }, 'Failed to delete user');
+      return reply.status(500).send({ message: 'Failed to delete user due to related records. Please contact support.' });
+    }
   });
 
   // ─── Services CRUD (admin) ─────────────────────────────────
