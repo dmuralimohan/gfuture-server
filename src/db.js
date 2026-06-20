@@ -207,6 +207,24 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_user_plans_user ON user_plans(user_id, status);
 
+  CREATE TABLE IF NOT EXISTS plan_subscription_payments (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    plan_id INTEGER NOT NULL,
+    amount REAL NOT NULL,
+    currency TEXT NOT NULL DEFAULT 'INR',
+    status TEXT NOT NULL DEFAULT 'pending',
+    is_first_subscription INTEGER NOT NULL DEFAULT 0,
+    razorpay_order_id TEXT NOT NULL UNIQUE,
+    razorpay_payment_id TEXT,
+    razorpay_signature TEXT,
+    completed_at TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users(id),
+    FOREIGN KEY (plan_id) REFERENCES plans(id)
+  );
+
   CREATE TABLE IF NOT EXISTS offers (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     provider_id TEXT,
@@ -276,6 +294,8 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_wallet_txn_type ON wallet_transactions(type);
   CREATE INDEX IF NOT EXISTS idx_wallet_topups_user ON wallet_topups(user_id, created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_wallet_topups_status ON wallet_topups(status, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_plan_subscription_payments_user ON plan_subscription_payments(user_id, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_plan_subscription_payments_status ON plan_subscription_payments(status, created_at DESC);
 
   -- Platform Settings
   CREATE TABLE IF NOT EXISTS settings (
