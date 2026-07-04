@@ -51,6 +51,8 @@ db.exec(`
     rating REAL DEFAULT 0,
     reviews INTEGER DEFAULT 0,
     image TEXT,
+    image_links TEXT,
+    location TEXT,
     description TEXT,
     duration TEXT,
     warranty TEXT,
@@ -472,6 +474,8 @@ const migrations = [
   { table: 'services', column: 'type', type: "TEXT NOT NULL DEFAULT 'service'" },
   { table: 'services', column: 'size_value', type: 'TEXT' },
   { table: 'services', column: 'size_unit', type: 'TEXT' },
+  { table: 'services', column: 'image_links', type: 'TEXT' },
+  { table: 'services', column: 'location', type: 'TEXT' },
   { table: 'payments', column: 'razorpay_order_id', type: 'TEXT' },
   { table: 'payments', column: 'razorpay_payment_id', type: 'TEXT' },
   { table: 'payments', column: 'razorpay_signature', type: 'TEXT' },
@@ -539,6 +543,11 @@ for (const user of usersWithoutReferral) {
   const referralCode = generateUniqueReferralCode(seed);
   db.prepare('UPDATE users SET referral_code = ? WHERE id = ?').run(referralCode, user.id);
 }
+
+// Backfill location for existing products without location.
+db.prepare(
+  "UPDATE services SET location = 'Kadalur' WHERE type = 'product' AND (location IS NULL OR trim(location) = '')"
+).run();
 
 // Course Meetings — one meeting link per course service, shared with all purchasers
 db.exec(`

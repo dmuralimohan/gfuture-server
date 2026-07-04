@@ -29,6 +29,11 @@ function requireAdmin(fastify) {
 
 export default async function adminRoutes(fastify) {
   const adminOnly = requireAdmin(fastify);
+  const parseServiceRecord = (service) => ({
+    ...service,
+    includes: service.includes ? JSON.parse(service.includes) : [],
+    image_links: service.image_links ? JSON.parse(service.image_links) : [],
+  });
 
   // ─── Dashboard Stats ────────────────────────────────────────
   fastify.get('/stats', { preHandler: [adminOnly] }, async () => {
@@ -366,24 +371,47 @@ export default async function adminRoutes(fastify) {
       LIMIT ? OFFSET ?
     `).all(...params, Number(limit), Number(offset));
 
-    const parsed = services.map((s) => ({ ...s, includes: s.includes ? JSON.parse(s.includes) : [] }));
+    const parsed = services.map(parseServiceRecord);
     return { services: parsed, total, page: Number(page), totalPages: Math.ceil(total / Number(limit)) };
   });
 
   // POST create service (admin)
   fastify.post('/services', { preHandler: [adminOnly] }, async (request, reply) => {
-    const { name, category_id, provider_id, price, description, duration, warranty, image, includes, type, size_value, size_unit } = request.body;
+    const { name, category_id, provider_id, price, description, duration, warranty, image, image_links, includes, type, size_value, size_unit, location } = request.body;
     if (!name || !category_id || !price) {
       return reply.status(400).send({ message: 'Name, category and price are required' });
     }
 
+    const serviceType = type || 'service';
+    const normalizedLocation = typeof location === 'string' ? location.trim() : '';
+    if (serviceType === 'product' && !normalizedLocation) {
+      return reply.status(400).send({ message: 'Location is required when adding a product' });
+    }
+
+    const imageLinksJson = Array.isArray(image_links) ? JSON.stringify(image_links.filter(Boolean)) : null;
+
     const result = db.prepare(`
-      INSERT INTO services (name, category_id, provider_id, price, description, duration, warranty, image, includes, type, size_value, size_unit)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(name, category_id, provider_id || null, price, description, duration, warranty, image, JSON.stringify(includes || []), type || 'service', size_value || null, size_unit || null);
+      INSERT INTO services (name, category_id, provider_id, price, description, duration, warranty, image, image_links, includes, type, size_value, size_unit, location)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      name,
+      category_id,
+      provider_id || null,
+      price,
+      description,
+      duration,
+      warranty,
+      image,
+      imageLinksJson,
+      JSON.stringify(includes || []),
+      serviceType,
+      size_value || null,
+      size_unit || null,
+      normalizedLocation || null,
+    );
 
     const service = db.prepare('SELECT * FROM services WHERE id = ?').get(result.lastInsertRowid);
-    return reply.status(201).send({ service });
+    return reply.status(201).send({ service: parseServiceRecord(service) });
   });
 
   // PUT update service (admin)
@@ -391,7 +419,15 @@ export default async function adminRoutes(fastify) {
     const service = db.prepare('SELECT * FROM services WHERE id = ?').get(request.params.id);
     if (!service) return reply.status(404).send({ message: 'Service not found' });
 
-    const { name, category_id, provider_id, price, description, duration, warranty, image, includes, active, type, size_value, size_unit } = request.body;
+    const { name, category_id, provider_id, price, description, duration, warranty, image, image_links, includes, active, type, size_value, size_unit, location } = request.body;
+    const nextType = type || service.type;
+    const requestedLocation = typeof location === 'string' ? location.trim() : null;
+    const effectiveLocation = requestedLocation !== null ? requestedLocation : (service.location || '');
+    if (nextType === 'product' && !effectiveLocation) {
+      return reply.status(400).send({ message: 'Location is required for products' });
+    }
+
+    const imageLinksJson = Array.isArray(image_links) ? JSON.stringify(image_links.filter(Boolean)) : null;
     db.prepare(`
       UPDATE services SET
         name = COALESCE(?, name),
@@ -402,18 +438,36 @@ export default async function adminRoutes(fastify) {
         duration = COALESCE(?, duration),
         warranty = COALESCE(?, warranty),
         image = COALESCE(?, image),
+        image_links = COALESCE(?, image_links),
         includes = COALESCE(?, includes),
         active = COALESCE(?, active),
         type = COALESCE(?, type),
         size_value = ?,
         size_unit = ?,
+        location = COALESCE(?, location),
         updated_at = datetime('now')
       WHERE id = ?
-    `).run(name, category_id, provider_id, price, description, duration, warranty, image, includes ? JSON.stringify(includes) : null, active, type, size_value !== undefined ? size_value : null, size_unit !== undefined ? size_unit : null, request.params.id);
+    `).run(
+      name,
+      category_id,
+      provider_id,
+      price,
+      description,
+      duration,
+      warranty,
+      image,
+      imageLinksJson,
+      includes ? JSON.stringify(includes) : null,
+      active,
+      type,
+      size_value !== undefined ? size_value : null,
+      size_unit !== undefined ? size_unit : null,
+      location,
+      request.params.id,
+    );
 
     const updated = db.prepare('SELECT s.*, c.name as category_name FROM services s LEFT JOIN categories c ON s.category_id = c.id WHERE s.id = ?').get(request.params.id);
-    updated.includes = updated.includes ? JSON.parse(updated.includes) : [];
-    return { service: updated };
+    return { service: parseServiceRecord(updated) };
   });
 
   // DELETE service (admin)

@@ -1,6 +1,12 @@
 import db from '../db.js';
 
 export default async function serviceRoutes(fastify) {
+  const parseServiceRecord = (service) => ({
+    ...service,
+    includes: service.includes ? JSON.parse(service.includes) : [],
+    image_links: service.image_links ? JSON.parse(service.image_links) : [],
+  });
+
   const updateServiceReviewSummary = (serviceId) => {
     const agg = db.prepare(
       `SELECT COUNT(*) as totalReviews, ROUND(COALESCE(AVG(rating), 0), 1) as avgRating
@@ -53,10 +59,7 @@ export default async function serviceRoutes(fastify) {
       LIMIT ? OFFSET ?
     `).all(...params, Number(limit), Number(offset));
 
-    const parsed = services.map((s) => ({
-      ...s,
-      includes: s.includes ? JSON.parse(s.includes) : [],
-    }));
+    const parsed = services.map(parseServiceRecord);
 
     reply.header('Cache-Control', 'public, max-age=60, stale-while-revalidate=120');
     return {
@@ -82,8 +85,7 @@ export default async function serviceRoutes(fastify) {
       return reply.status(404).send({ message: 'Service not found' });
     }
 
-    service.includes = service.includes ? JSON.parse(service.includes) : [];
-    return { service };
+    return { service: parseServiceRecord(service) };
   });
 
   // GET /api/services/:id/reviews — list reviews for a service (public)
@@ -182,15 +184,53 @@ export default async function serviceRoutes(fastify) {
       return reply.status(403).send({ message: 'Only providers can create services' });
     }
 
-    const { name, category_id, price, description, duration, warranty, image, includes } = request.body;
+    const {
+      name,
+      category_id,
+      price,
+      description,
+      duration,
+      warranty,
+      image,
+      image_links,
+      includes,
+      type,
+      size_value,
+      size_unit,
+      location,
+    } = request.body;
+
+    const serviceType = type || 'service';
+    const normalizedLocation = typeof location === 'string' ? location.trim() : '';
+
+    if (serviceType === 'product' && !normalizedLocation) {
+      return reply.status(400).send({ message: 'Location is required when adding a product' });
+    }
+
+    const imageLinksJson = Array.isArray(image_links) ? JSON.stringify(image_links.filter(Boolean)) : null;
 
     const result = db.prepare(`
-      INSERT INTO services (name, category_id, provider_id, price, description, duration, warranty, image, includes)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(name, category_id, request.user.id, price, description, duration, warranty, image, JSON.stringify(includes || []));
+      INSERT INTO services (name, category_id, provider_id, price, description, duration, warranty, image, image_links, includes, type, size_value, size_unit, location)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      name,
+      category_id,
+      request.user.id,
+      price,
+      description,
+      duration,
+      warranty,
+      image,
+      imageLinksJson,
+      JSON.stringify(includes || []),
+      serviceType,
+      size_value || null,
+      size_unit || null,
+      normalizedLocation || null,
+    );
 
     const service = db.prepare('SELECT * FROM services WHERE id = ?').get(result.lastInsertRowid);
-    return reply.status(201).send({ service });
+    return reply.status(201).send({ service: parseServiceRecord(service) });
   });
 
   // DELETE /api/services/:id — delete service (owner or admin)
@@ -215,7 +255,23 @@ export default async function serviceRoutes(fastify) {
       return reply.status(403).send({ message: 'Not authorized' });
     }
 
-    const { name, price, description, duration, warranty, image, includes, active } = request.body;
+    const { name, price, description, duration, warranty, image, image_links, includes, active, type, size_value, size_unit, location } = request.body;
+    const nextType = type || service.type;
+    const requestedLocation = typeof location === 'string' ? location.trim() : null;
+    const effectiveLocation = requestedLocation !== null ? requestedLocation : (service.location || '');
+
+    if (nextType === 'product' && !effectiveLocation) {
+      return reply.status(400).send({ message: 'Location is required for products' });
+    }
+
+    if (service.type === 'product' && location !== undefined) {
+      const currentLocation = service.location || '';
+      if (requestedLocation !== currentLocation) {
+        return reply.status(403).send({ message: 'Only admin can change product location after upload' });
+      }
+    }
+
+    const imageLinksJson = Array.isArray(image_links) ? JSON.stringify(image_links.filter(Boolean)) : null;
 
     db.prepare(`
       UPDATE services SET
@@ -225,14 +281,32 @@ export default async function serviceRoutes(fastify) {
         duration = COALESCE(?, duration),
         warranty = COALESCE(?, warranty),
         image = COALESCE(?, image),
+        image_links = COALESCE(?, image_links),
         includes = COALESCE(?, includes),
         active = COALESCE(?, active),
+        type = COALESCE(?, type),
+        size_value = COALESCE(?, size_value),
+        size_unit = COALESCE(?, size_unit),
         updated_at = datetime('now')
       WHERE id = ?
-    `).run(name, price, description, duration, warranty, image, includes ? JSON.stringify(includes) : null, active, request.params.id);
+    `).run(
+      name,
+      price,
+      description,
+      duration,
+      warranty,
+      image,
+      imageLinksJson,
+      includes ? JSON.stringify(includes) : null,
+      active,
+      type,
+      size_value,
+      size_unit,
+      request.params.id,
+    );
 
     const updated = db.prepare('SELECT * FROM services WHERE id = ?').get(request.params.id);
-    return { service: updated };
+    return { service: parseServiceRecord(updated) };
   });
 }
 
