@@ -224,6 +224,40 @@ export default async function authRoutes(fastify) {
     return { user: sanitizeUser(user), providerProfile };
   });
 
+  // GET /api/auth/referrals (protected)
+  fastify.get('/referrals', { preHandler: [fastify.authenticate] }, async (request) => {
+    const referrals = db.prepare(
+      `SELECT
+          u.id,
+          u.name,
+          u.email,
+          u.phone,
+          u.role,
+          u.created_at,
+          u.referral_rewarded_at,
+          p.id as active_plan_id,
+          p.name as active_plan_name,
+          p.price as active_plan_price,
+          rr.reward_amount,
+          rr.created_at as rewarded_at
+       FROM users u
+       LEFT JOIN user_plans up
+         ON up.user_id = u.id
+        AND up.status = 'active'
+       LEFT JOIN plans p
+         ON p.id = up.plan_id
+       LEFT JOIN referral_rewards rr
+         ON rr.referred_user_id = u.id
+       WHERE u.referred_by_user_id = ?
+       ORDER BY u.created_at DESC`
+    ).all(request.user.id);
+
+    return {
+      total: referrals.length,
+      referrals,
+    };
+  });
+
   // PUT /api/auth/profile (protected)
   fastify.put('/profile', { preHandler: [fastify.authenticate] }, async (request) => {
     const { name, phone, profile_picture, designation, experience_years, expertise, bio } = request.body;

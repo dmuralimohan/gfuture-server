@@ -67,61 +67,113 @@ function createSubscription(userId, planId) {
     return parsePlan(subscription);
 }
 
-function applyReferralReward({ userId, plan, isFirstPlanSubscription, fastify }) {
+function applyReferralRewardForPair({ referrerId, referredId, fastify }) {
     try {
-        const subscriber = db
-            .prepare('SELECT id, name, referred_by_user_id, referral_rewarded_at FROM users WHERE id = ?')
-            .get(userId);
+        const applyReferralRewardTxn = db.transaction(() => {
+            const referredUser = db
+                .prepare('SELECT id, name, referred_by_user_id, referral_rewarded_at FROM users WHERE id = ?')
+                .get(referredId);
 
-        const planAmount = Number(plan.price || 0);
-        const rewardAmount = Math.round(planAmount * 0.1 * 100) / 100;
+            if (!referredUser || referredUser.referred_by_user_id !== referrerId || referredUser.referral_rewarded_at) {
+                return;
+            }
 
-        if (subscriber?.referred_by_user_id && !subscriber.referral_rewarded_at && rewardAmount > 0 && isFirstPlanSubscription) {
-            const applyReferralRewardTxn = db.transaction(() => {
-                const latestSubscriber = db
-                    .prepare('SELECT id, name, referred_by_user_id, referral_rewarded_at FROM users WHERE id = ?')
-                    .get(subscriber.id);
+            const existingReward = db
+                .prepare('SELECT id FROM referral_rewards WHERE referred_user_id = ?')
+                .get(referredId);
 
-                if (!latestSubscriber?.referred_by_user_id || latestSubscriber.referral_rewarded_at) {
-                    return;
-                }
+            if (existingReward) {
+                db.prepare("UPDATE users SET referral_rewarded_at = datetime('now') WHERE id = ?").run(referredId);
+                return;
+            }
 
-                const existingReward = db
-                    .prepare('SELECT id FROM referral_rewards WHERE referred_user_id = ?')
-                    .get(latestSubscriber.id);
+            const referredPlan = db
+                .prepare(
+                    `SELECT p.id, p.name, p.price
+                     FROM user_plans up
+                     JOIN plans p ON p.id = up.plan_id
+                     WHERE up.user_id = ? AND up.status = 'active'
+                     ORDER BY up.subscribed_at DESC
+                     LIMIT 1`
+                )
+                .get(referredId);
 
-                if (existingReward) {
-                    db.prepare("UPDATE users SET referral_rewarded_at = datetime('now') WHERE id = ?").run(latestSubscriber.id);
-                    return;
-                }
+            const referrerPlan = db
+                .prepare(
+                    `SELECT p.id, p.name, p.price
+                     FROM user_plans up
+                     JOIN plans p ON p.id = up.plan_id
+                     WHERE up.user_id = ? AND up.status = 'active'
+                     ORDER BY up.subscribed_at DESC
+                     LIMIT 1`
+                )
+                .get(referrerId);
 
-                addTransaction(latestSubscriber.referred_by_user_id, {
-                    type: 'referral_bonus',
-                    amount: rewardAmount,
-                    description: `Referral bonus from ${latestSubscriber.name}'s ${plan.name} plan`,
-                    referenceType: 'referral_plan',
-                    referenceId: latestSubscriber.id,
-                });
+            if (!referredPlan || !referrerPlan) return;
 
-                db.prepare(
-                    `INSERT INTO referral_rewards (id, referrer_user_id, referred_user_id, plan_id, plan_amount, reward_amount)
-                     VALUES (?, ?, ?, ?, ?, ?)`
-                ).run(
-                    uuidv4(),
-                    latestSubscriber.referred_by_user_id,
-                    latestSubscriber.id,
-                    plan.id,
-                    planAmount,
-                    rewardAmount,
-                );
+            // Reward only when both users are on the same active scheme.
+            if (Number(referredPlan.id) !== Number(referrerPlan.id)) return;
 
-                db.prepare("UPDATE users SET referral_rewarded_at = datetime('now') WHERE id = ?").run(latestSubscriber.id);
+            const planAmount = Number(referredPlan.price || 0);
+            const rewardAmount = Math.round(planAmount * 0.1 * 100) / 100;
+            if (rewardAmount <= 0) return;
+
+            addTransaction(referrerId, {
+                type: 'referral_bonus',
+                amount: rewardAmount,
+                description: `Referral bonus from ${referredUser.name}'s ${referredPlan.name} plan`,
+                referenceType: 'referral_plan',
+                referenceId: referredId,
             });
 
-            applyReferralRewardTxn();
-        }
+            db.prepare(
+                `INSERT INTO referral_rewards (id, referrer_user_id, referred_user_id, plan_id, plan_amount, reward_amount)
+                 VALUES (?, ?, ?, ?, ?, ?)`
+            ).run(
+                uuidv4(),
+                referrerId,
+                referredId,
+                referredPlan.id,
+                planAmount,
+                rewardAmount,
+            );
+
+            db.prepare("UPDATE users SET referral_rewarded_at = datetime('now') WHERE id = ?").run(referredId);
+        });
+
+        applyReferralRewardTxn();
     } catch (err) {
         fastify.log.error('Referral reward processing failed:', err);
+    }
+}
+
+function applyReferralRewardsOnPlanChange({ userId, fastify }) {
+    const subscriber = db
+        .prepare('SELECT id, referred_by_user_id FROM users WHERE id = ?')
+        .get(userId);
+
+    if (!subscriber) return;
+
+    // Case 1: user was referred by someone. Evaluate reward eligibility for that pair.
+    if (subscriber.referred_by_user_id) {
+        applyReferralRewardForPair({
+            referrerId: subscriber.referred_by_user_id,
+            referredId: subscriber.id,
+            fastify,
+        });
+    }
+
+    // Case 2: user is a referrer. If they upgraded to match any referred user's scheme, reward those pairs.
+    const referredUsers = db
+        .prepare('SELECT id FROM users WHERE referred_by_user_id = ?')
+        .all(subscriber.id);
+
+    for (const referredUser of referredUsers) {
+        applyReferralRewardForPair({
+            referrerId: subscriber.id,
+            referredId: referredUser.id,
+            fastify,
+        });
     }
 }
 
@@ -219,11 +271,6 @@ export default async function planRoutes(fastify) {
             };
         }
 
-        const priorPlanCount = db
-            .prepare('SELECT COUNT(*) as count FROM user_plans WHERE user_id = ?')
-            .get(request.user.id)?.count || 0;
-        const isFirstPlanSubscription = Number(priorPlanCount) === 0;
-
         try {
             const paymentId = uuidv4();
             const rzpOrder = await razorpay.orders.create({
@@ -240,14 +287,13 @@ export default async function planRoutes(fastify) {
 
             db.prepare(
                 `INSERT INTO plan_subscription_payments
-                 (id, user_id, plan_id, amount, currency, status, is_first_subscription, razorpay_order_id)
-                 VALUES (?, ?, ?, ?, 'INR', 'pending', ?, ?)`
+                 (id, user_id, plan_id, amount, currency, status, razorpay_order_id)
+                 VALUES (?, ?, ?, ?, 'INR', 'pending', ?)`
             ).run(
                 paymentId,
                 request.user.id,
                 plan.id,
                 planAmount,
-                isFirstPlanSubscription ? 1 : 0,
                 rzpOrder.id,
             );
 
@@ -342,15 +388,7 @@ export default async function planRoutes(fastify) {
 
             db.prepare('COMMIT').run();
 
-            const paidPlan = db.prepare('SELECT * FROM plans WHERE id = ?').get(payment.plan_id);
-            if (paidPlan) {
-                applyReferralReward({
-                    userId: request.user.id,
-                    plan: paidPlan,
-                    isFirstPlanSubscription: Number(payment.is_first_subscription) === 1,
-                    fastify,
-                });
-            }
+            applyReferralRewardsOnPlanChange({ userId: request.user.id, fastify });
 
             return {
                 success: true,
@@ -377,20 +415,9 @@ export default async function planRoutes(fastify) {
             return reply.status(400).send({ message: 'Paid plans require payment verification. Use subscribe/initiate and subscribe/verify.' });
         }
 
-        // Referral bonus is only for first-time plan-only signups.
-        const priorPlanCount = db
-            .prepare('SELECT COUNT(*) as count FROM user_plans WHERE user_id = ?')
-            .get(request.user.id)?.count || 0;
-        const isFirstPlanSubscription = Number(priorPlanCount) === 0;
-
         const subscription = createSubscription(request.user.id, plan.id);
 
-        applyReferralReward({
-            userId: request.user.id,
-            plan,
-            isFirstPlanSubscription,
-            fastify,
-        });
+        applyReferralRewardsOnPlanChange({ userId: request.user.id, fastify });
 
         return reply.status(201).send({ subscription, message: 'Plan subscribed successfully' });
     });
