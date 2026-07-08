@@ -88,7 +88,9 @@ export default async function adminRoutes(fastify) {
 
   // ─── Daily Analytics ────────────────────────────────────────
   fastify.get('/analytics/daily', { preHandler: [adminOnly] }, async (request) => {
-    const { days = 30 } = request.query;
+    const daysRaw = parseInt(request.query.days, 10);
+    const days = (!isNaN(daysRaw) && daysRaw > 0 && daysRaw <= 365) ? daysRaw : 30;
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
 
     const dailyOrders = db.prepare(`
       SELECT DATE(created_at) as date,
@@ -96,10 +98,10 @@ export default async function adminRoutes(fastify) {
              COALESCE(SUM(total), 0) as revenue,
              COALESCE(SUM(platform_fee), 0) as platform_fees
       FROM orders
-      WHERE created_at >= datetime('now', '-${Number(days)} days')
+      WHERE created_at >= ?
       GROUP BY DATE(created_at)
       ORDER BY date ASC
-    `).all();
+    `).all(since);
 
     const dailySignups = db.prepare(`
       SELECT DATE(created_at) as date,
@@ -107,17 +109,19 @@ export default async function adminRoutes(fastify) {
              SUM(CASE WHEN role = 'customer' THEN 1 ELSE 0 END) as customers,
              SUM(CASE WHEN role = 'provider' THEN 1 ELSE 0 END) as providers
       FROM users
-      WHERE created_at >= datetime('now', '-${Number(days)} days')
+      WHERE created_at >= ?
       GROUP BY DATE(created_at)
       ORDER BY date ASC
-    `).all();
+    `).all(since);
 
     return { dailyOrders, dailySignups };
   });
 
   // ─── Monthly Analytics ──────────────────────────────────────
   fastify.get('/analytics/monthly', { preHandler: [adminOnly] }, async (request) => {
-    const { months = 12 } = request.query;
+    const monthsRaw = parseInt(request.query.months, 10);
+    const months = (!isNaN(monthsRaw) && monthsRaw > 0 && monthsRaw <= 60) ? monthsRaw : 12;
+    const since = new Date(Date.now() - months * 30 * 24 * 60 * 60 * 1000).toISOString();
 
     const monthlyOrders = db.prepare(`
       SELECT strftime('%Y-%m', created_at) as month,
@@ -125,10 +129,10 @@ export default async function adminRoutes(fastify) {
              COALESCE(SUM(total), 0) as revenue,
              COALESCE(SUM(platform_fee), 0) as platform_fees
       FROM orders
-      WHERE created_at >= datetime('now', '-${Number(months)} months')
+      WHERE created_at >= ?
       GROUP BY strftime('%Y-%m', created_at)
       ORDER BY month ASC
-    `).all();
+    `).all(since);
 
     const monthlySignups = db.prepare(`
       SELECT strftime('%Y-%m', created_at) as month,
@@ -136,10 +140,10 @@ export default async function adminRoutes(fastify) {
              SUM(CASE WHEN role = 'customer' THEN 1 ELSE 0 END) as customers,
              SUM(CASE WHEN role = 'provider' THEN 1 ELSE 0 END) as providers
       FROM users
-      WHERE created_at >= datetime('now', '-${Number(months)} months')
+      WHERE created_at >= ?
       GROUP BY strftime('%Y-%m', created_at)
       ORDER BY month ASC
-    `).all();
+    `).all(since);
 
     return { monthlyOrders, monthlySignups };
   });
@@ -149,7 +153,8 @@ export default async function adminRoutes(fastify) {
   // GET all users (with search, filter, pagination)
   fastify.get('/users', { preHandler: [adminOnly] }, async (request) => {
     const { role, search, page = 1, limit = 20 } = request.query;
-    const offset = (Number(page) - 1) * Number(limit);
+    const safeLimit = Math.min(Math.max(1, Number(limit) || 20), 100);
+    const offset = (Math.max(1, Number(page)) - 1) * safeLimit;
     let where = 'WHERE 1=1';
     const params = [];
 
@@ -168,9 +173,10 @@ export default async function adminRoutes(fastify) {
       FROM users ${where}
       ORDER BY created_at DESC
       LIMIT ? OFFSET ?
-    `).all(...params, Number(limit), Number(offset));
+    `).all(...params, safeLimit, offset);
 
     // Enrich with order count and total spent (single query instead of N+1)
+    let enriched;
     if (users.length > 0) {
       const placeholders = users.map(() => '?').join(',');
       const userIds = users.map(u => u.id);
@@ -189,17 +195,17 @@ export default async function adminRoutes(fastify) {
 
       const statsMap = Object.fromEntries(orderStats.map(s => [s.customer_id, s]));
       const referralMap = Object.fromEntries(referralStats.map(s => [s.referrer_id, s.referred_users_count]));
-      var enriched = users.map(u => ({
+      enriched = users.map(u => ({
         ...u,
         order_count: statsMap[u.id]?.order_count || 0,
         total_spent: statsMap[u.id]?.total_spent || 0,
         referred_users_count: referralMap[u.id] || 0,
       }));
     } else {
-      var enriched = [];
+      enriched = [];
     }
 
-    return { users: enriched, total, page: Number(page), totalPages: Math.ceil(total / Number(limit)) };
+    return { users: enriched, total, page: Number(page), totalPages: Math.ceil(total / safeLimit) };
   });
 
   // GET single user

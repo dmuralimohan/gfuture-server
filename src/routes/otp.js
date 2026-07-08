@@ -84,11 +84,14 @@ export default async function otpRoutes(fastify) {
         };
       } catch (twilioErr) {
         fastify.log.error('Twilio error:', twilioErr.message);
-        // Fallback to dev mode
+        // In production: do not expose OTP even on Twilio failure — log only
+        if (process.env.NODE_ENV !== 'development') {
+          return reply.status(503).send({ message: 'SMS service temporarily unavailable. Please try again shortly.' });
+        }
         return {
           success: true,
           message: 'OTP generated (Twilio unavailable — check server logs)',
-          _dev_otp: otp, // Show OTP when Twilio fails for dev testing
+          _dev_otp: otp,
         };
       }
     }
@@ -98,7 +101,7 @@ export default async function otpRoutes(fastify) {
     return {
       success: true,
       message: 'OTP sent successfully',
-      _dev_otp: otp, // Remove in production
+      ...(process.env.NODE_ENV === 'development' ? { _dev_otp: otp } : {}),
     };
   });
 

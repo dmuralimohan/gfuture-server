@@ -37,20 +37,29 @@ const allowedOrigins = process.env.CORS_ORIGINS
   : ['http://localhost:5173', 'http://localhost:5174', 'http://localhost:3000', 'http://3.95.226.54:3001', 'http://10.69.67.139:5173'];
 
 await app.register(cors, {
-  origin: true,
+  origin: (origin, cb) => {
+    // Allow requests with no origin (mobile apps, curl, server-to-server)
+    if (!origin) return cb(null, true);
+    if (allowedOrigins.some(o => origin.startsWith(o.trim()))) return cb(null, true);
+    cb(new Error('Not allowed by CORS'), false);
+  },
   credentials: true,
   methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 });
 
 await app.register(jwt, {
-  secret: process.env.JWT_SECRET || 'gfuture_super_secret_key_2026', //@author muralimohand
+  secret: (() => {
+    const s = process.env.JWT_SECRET;
+    if (!s || s.length < 32) throw new Error('JWT_SECRET env var is required and must be at least 32 characters');
+    return s;
+  })(),
   sign: { expiresIn: '30m' }, // Access token = 30 minutes
 });
 
 await app.register(multipart, {
   limits: {
-    fileSize: 500 * 1024 * 1024,
+    fileSize: 50 * 1024 * 1024, // 50 MB max per file
     files: 2,
   },
 });
