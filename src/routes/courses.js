@@ -559,4 +559,25 @@ export default async function courseRoutes(fastify) {
 
         return { course: serializeCourse(updatedCourse, request.user.id), notifiedCount };
     });
+
+    // DELETE /api/courses/:id — delete course (owner or admin only)
+    fastify.delete('/:id', { preHandler: [fastify.authenticate] }, async (request, reply) => {
+        const course = db.prepare('SELECT * FROM courses WHERE id = ?').get(request.params.id);
+        if (!course) {
+            return reply.status(404).send({ message: 'Course not found' });
+        }
+        if (!requireOwnerOrAdmin(course, request.user)) {
+            return reply.status(403).send({ message: 'Not authorized to delete this course' });
+        }
+
+        // Remove files from disk
+        removeFile(course.video_path);
+        removeFile(course.attachment_path);
+
+        // Remove enrollments and course
+        db.prepare('DELETE FROM course_enrollments WHERE course_id = ?').run(course.id);
+        db.prepare('DELETE FROM courses WHERE id = ?').run(course.id);
+
+        return { message: 'Course deleted successfully' };
+    });
 }
