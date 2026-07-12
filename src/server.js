@@ -31,18 +31,10 @@ if (!existsSync(uploadRoot)) {
   mkdirSync(uploadRoot, { recursive: true });
 }
 
-// CORS — allowed origins from env or defaults
-const allowedOrigins = process.env.CORS_ORIGINS
-  ? process.env.CORS_ORIGINS.split(',')
-  : ['http://localhost:5173', 'http://localhost:5174', 'http://localhost:3000', 'http://3.95.226.54:3001', 'http://10.69.67.139:5173'];
-
+// CORS — allow all origins for API (backend endpoints should be open to all clients)
+// Mobile apps, web clients, and server-to-server requests should all work
 await app.register(cors, {
-  origin: (origin, cb) => {
-    // Allow requests with no origin (mobile apps, curl, server-to-server)
-    if (!origin) return cb(null, true);
-    if (allowedOrigins.some(o => origin.startsWith(o.trim()))) return cb(null, true);
-    cb(new Error('Not allowed by CORS'), false);
-  },
+  origin: true, // Allow all origins
   credentials: true,
   methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
