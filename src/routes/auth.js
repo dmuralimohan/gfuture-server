@@ -226,6 +226,15 @@ export default async function authRoutes(fastify) {
 
   // GET /api/auth/referrals (protected)
   fastify.get('/referrals', { preHandler: [fastify.authenticate] }, async (request) => {
+    const currentPlan = db.prepare(
+      `SELECT p.name
+       FROM user_plans up
+       JOIN plans p ON p.id = up.plan_id
+       WHERE up.user_id = ? AND up.status = 'active'
+       ORDER BY up.subscribed_at DESC
+       LIMIT 1`
+    ).get(request.user.id);
+
     const referrals = db.prepare(
       `SELECT
           u.id,
@@ -252,9 +261,15 @@ export default async function authRoutes(fastify) {
        ORDER BY u.created_at DESC`
     ).all(request.user.id);
 
+    const currentPlanName = currentPlan?.name || null;
+
     return {
       total: referrals.length,
-      referrals,
+      current_plan_name: currentPlanName,
+      referrals: referrals.map((referral) => ({
+        ...referral,
+        plan: referral.active_plan_name || currentPlanName,
+      })),
     };
   });
 
