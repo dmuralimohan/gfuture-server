@@ -55,6 +55,19 @@ function readFormValue(fields, key) {
     return value;
 }
 
+function resolveCategoryId(value) {
+    const raw = toText(value);
+    if (!raw) return null;
+
+    const numericId = toInt(raw, null);
+    if (Number.isFinite(numericId)) {
+        return numericId;
+    }
+
+    const byName = db.prepare('SELECT id FROM categories WHERE lower(name) = lower(?)').get(raw);
+    return byName?.id ?? null;
+}
+
 async function saveUpload(part, targetDir, allowedKind = 'file') {
     ensureDir(targetDir);
     const originalName = part.filename || `${allowedKind}-${Date.now()}`;
@@ -231,8 +244,17 @@ export default async function courseRoutes(fastify) {
         }
 
         if (category) {
+            const resolvedCategoryId = resolveCategoryId(category);
+            if (resolvedCategoryId == null) {
+                return {
+                    courses: [],
+                    total: 0,
+                    page: Number(page),
+                    totalPages: 0,
+                };
+            }
             conditions.push('c.category_id = ?');
-            filterParams.push(Number(category));
+            filterParams.push(resolvedCategoryId);
         }
 
         if (search) {
@@ -346,7 +368,11 @@ export default async function courseRoutes(fastify) {
         const price = toFloat(readFormValue(fields, 'price'), 0) || 0;
         const level = toText(readFormValue(fields, 'level')) || 'beginner';
         const duration = toText(readFormValue(fields, 'duration'));
-        const categoryId = toInt(readFormValue(fields, 'category_id'));
+        const categoryRaw = readFormValue(fields, 'category_id');
+        const categoryId = resolveCategoryId(categoryRaw);
+        if (toText(categoryRaw) && categoryId == null) {
+            return reply.status(400).send({ message: 'Invalid category_id. Provide a valid category ID or name.' });
+        }
         const meetingTime = toText(readFormValue(fields, 'meeting_time'));
         const meetingDate = toText(readFormValue(fields, 'meeting_date'));
         const meetingLink = toText(readFormValue(fields, 'meeting_link')) || generateMeetingLink(title);
@@ -369,9 +395,9 @@ export default async function courseRoutes(fastify) {
         const attachmentFile = files.attachment || null;
 
         // Validate intro_video if provided
-        if (introVideoFile && introVideoFile.duration && introVideoFile.duration > 60) {
+        if (introVideoFile && introVideoFile.duration && introVideoFile.duration > 120) {
             removeFile(introVideoFile.path);
-            return reply.status(400).send({ message: 'Intro video must be less than 60 seconds' });
+            return reply.status(400).send({ message: 'Intro video must be less than 120 seconds' });
         }
 
         const result = db.prepare(`
@@ -439,7 +465,11 @@ export default async function courseRoutes(fastify) {
         const price = toFloat(readFormValue(fields, 'price'));
         const level = toText(readFormValue(fields, 'level'));
         const duration = toText(readFormValue(fields, 'duration'));
-        const categoryId = toInt(readFormValue(fields, 'category_id'));
+        const categoryRaw = readFormValue(fields, 'category_id');
+        const categoryId = resolveCategoryId(categoryRaw);
+        if (toText(categoryRaw) && categoryId == null) {
+            return reply.status(400).send({ message: 'Invalid category_id. Provide a valid category ID or name.' });
+        }
         const meetingTime = toText(readFormValue(fields, 'meeting_time'));
         const meetingDate = toText(readFormValue(fields, 'meeting_date'));
         const meetingLink = toText(readFormValue(fields, 'meeting_link'));
@@ -456,9 +486,9 @@ export default async function courseRoutes(fastify) {
         }
 
         // Validate intro_video if provided
-        if (files.intro_video && files.intro_video.duration && files.intro_video.duration > 60) {
+        if (files.intro_video && files.intro_video.duration && files.intro_video.duration > 120) {
             removeFile(files.intro_video.path);
-            return reply.status(400).send({ message: 'Intro video must be less than 60 seconds' });
+            return reply.status(400).send({ message: 'Intro video must be less than 120 seconds' });
         }
 
         db.prepare(`

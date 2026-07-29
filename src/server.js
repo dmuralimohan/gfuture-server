@@ -52,7 +52,7 @@ await app.register(jwt, {
 await app.register(multipart, {
   limits: {
     fileSize: 500 * 1024 * 1024, // 500 MB max per file
-    files: 2,
+    files: 5,
   },
 });
 
