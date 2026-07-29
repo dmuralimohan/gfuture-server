@@ -37,6 +37,18 @@ function getExtraFees() {
 }
 
 export default async function orderRoutes(fastify) {
+  // GET /api/orders/fees — public fee config for client-side estimates
+  fastify.get('/fees', async () => {
+    const platformFeeRate = getPlatformFeeRate();
+    const extraFees = getExtraFees();
+    const extraFeeTotal = extraFees.reduce((sum, fee) => sum + Number(fee.amount || 0), 0);
+    return {
+      platform_fee_rate: Math.max(0, Number((platformFeeRate * 100).toFixed(4))),
+      extra_fees: extraFees,
+      extra_fee_total: Number(extraFeeTotal.toFixed(2)),
+    };
+  });
+
   // POST /api/orders — place order (authenticated)
   fastify.post('/', { preHandler: [fastify.authenticate] }, async (request, reply) => {
     const { items, address, scheduled_date, scheduled_time, coupon_code } = request.body;
