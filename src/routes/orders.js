@@ -3,7 +3,7 @@ import db from '../db.js';
 import { sendToUser } from '../ws.js';
 import { sendMeetingLinkSMS } from '../sms.js';
 
-const PLATFORM_FEE_RATE = 0.0102; // 1.02% - default fallback
+const PLATFORM_FEE_RATE = 0; // 0% default fallback
 
 function getPlatformFeeRate() {
   try {

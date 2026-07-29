@@ -308,7 +308,7 @@ db.exec(`
   );
 
   -- Insert default settings if not present
-  INSERT OR IGNORE INTO settings (key, value, label) VALUES ('platform_fee_rate', '1.02', 'Platform Fee (%)');
+  INSERT OR IGNORE INTO settings (key, value, label) VALUES ('platform_fee_rate', '0', 'Platform Fee (%)');
   INSERT OR IGNORE INTO settings (key, value, label) VALUES ('extra_fee_label', '', 'Extra Fee Label');
   INSERT OR IGNORE INTO settings (key, value, label) VALUES ('extra_fee_amount', '0', 'Extra Fee Amount (₹)');
 
