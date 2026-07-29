@@ -484,6 +484,10 @@ const migrations = [
   { table: 'payments', column: 'razorpay_payment_id', type: 'TEXT' },
   { table: 'payments', column: 'razorpay_signature', type: 'TEXT' },
   { table: 'orders', column: 'meeting_requested', type: 'INTEGER DEFAULT 0' },
+  { table: 'courses', column: 'intro_video_url', type: 'TEXT' },
+  { table: 'courses', column: 'intro_video_name', type: 'TEXT' },
+  { table: 'courses', column: 'intro_video_size', type: 'INTEGER DEFAULT 0' },
+  { table: 'courses', column: 'intro_video_duration', type: 'INTEGER DEFAULT 0' },
 ];
 
 for (const { table, column, type } of migrations) {
