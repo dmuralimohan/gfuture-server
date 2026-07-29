@@ -109,6 +109,9 @@ function serializeCourse(row, viewerId = null, extra = {}) {
     const attachment = row.attachment_path
         ? { url: row.attachment_path, name: row.attachment_name, kind: 'attachment' }
         : null;
+    const introVideo = row.intro_video_url
+        ? { url: row.intro_video_url, name: row.intro_video_name, size: row.intro_video_size, duration: row.intro_video_duration, kind: 'intro_video' }
+        : null;
 
     return {
         ...row,
@@ -119,6 +122,7 @@ function serializeCourse(row, viewerId = null, extra = {}) {
         enrollment_count: Number(row.enrollment_count || 0),
         is_subscribed: !!row.is_subscribed,
         providerProfile: extra.providerProfile || null,
+        intro_video: introVideo,
         materials: [video, attachment].filter(Boolean),
     };
 }
@@ -154,10 +158,10 @@ async function readMultipartFields(request) {
 
     for await (const part of request.parts()) {
         if (part.type === 'file') {
-            if (part.fieldname === 'video' && part.mimetype && !part.mimetype.startsWith('video/')) {
-                throw new Error('Video upload must be a video file');
+            if ((part.fieldname === 'video' || part.fieldname === 'intro_video') && part.mimetype && !part.mimetype.startsWith('video/')) {
+                throw new Error(`${part.fieldname === 'intro_video' ? 'Intro video' : 'Video'} upload must be a video file`);
             }
-            const targetDir = part.fieldname === 'video' ? VIDEO_DIR : ATTACHMENT_DIR;
+            const targetDir = (part.fieldname === 'video' || part.fieldname === 'intro_video') ? VIDEO_DIR : ATTACHMENT_DIR;
             files[part.fieldname] = await saveUpload(part, targetDir, part.fieldname);
         } else {
             fields[part.fieldname] = part.value;
@@ -361,14 +365,21 @@ export default async function courseRoutes(fastify) {
         }
 
         const videoFile = files.video || null;
+        const introVideoFile = files.intro_video || null;
         const attachmentFile = files.attachment || null;
+
+        // Validate intro_video if provided
+        if (introVideoFile && introVideoFile.duration && introVideoFile.duration > 60) {
+            removeFile(introVideoFile.path);
+            return reply.status(400).send({ message: 'Intro video must be less than 60 seconds' });
+        }
 
         const result = db.prepare(`
       INSERT INTO courses (
         title, description, category_id, provider_id, designation, experience_years,
         expertise, price, level, duration, meeting_link, meeting_time, meeting_date,
-        video_path, video_name, video_size, attachment_path, attachment_name, active
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        video_path, video_name, video_size, intro_video_url, intro_video_name, intro_video_size, intro_video_duration, attachment_path, attachment_name, active
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
             title,
             description,
@@ -386,6 +397,10 @@ export default async function courseRoutes(fastify) {
             videoFile?.path || null,
             videoFile?.name || null,
             videoFile?.size || 0,
+            introVideoFile?.path || null,
+            introVideoFile?.name || null,
+            introVideoFile?.size || 0,
+            introVideoFile?.duration || 0,
             attachmentFile?.path || null,
             attachmentFile?.name || null,
             active,
@@ -433,8 +448,17 @@ export default async function courseRoutes(fastify) {
         if (files.video?.path) {
             removeFile(existing.video_path);
         }
+        if (files.intro_video?.path) {
+            removeFile(existing.intro_video_url);
+        }
         if (files.attachment?.path) {
             removeFile(existing.attachment_path);
+        }
+
+        // Validate intro_video if provided
+        if (files.intro_video && files.intro_video.duration && files.intro_video.duration > 60) {
+            removeFile(files.intro_video.path);
+            return reply.status(400).send({ message: 'Intro video must be less than 60 seconds' });
         }
 
         db.prepare(`
@@ -454,6 +478,10 @@ export default async function courseRoutes(fastify) {
         video_path = COALESCE(?, video_path),
         video_name = COALESCE(?, video_name),
         video_size = COALESCE(?, video_size),
+        intro_video_url = COALESCE(?, intro_video_url),
+        intro_video_name = COALESCE(?, intro_video_name),
+        intro_video_size = COALESCE(?, intro_video_size),
+        intro_video_duration = COALESCE(?, intro_video_duration),
         attachment_path = COALESCE(?, attachment_path),
         attachment_name = COALESCE(?, attachment_name),
         active = COALESCE(?, active),
@@ -475,6 +503,10 @@ export default async function courseRoutes(fastify) {
             files.video?.path || null,
             files.video?.name || null,
             files.video?.size || null,
+            files.intro_video?.path || null,
+            files.intro_video?.name || null,
+            files.intro_video?.size || null,
+            files.intro_video?.duration || null,
             files.attachment?.path || null,
             files.attachment?.name || null,
             active == null ? null : Number(active),
