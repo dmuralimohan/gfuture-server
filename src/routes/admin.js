@@ -210,7 +210,12 @@ export default async function adminRoutes(fastify) {
 
   // GET single user
   fastify.get('/users/:id', { preHandler: [adminOnly] }, async (request, reply) => {
-    const user = db.prepare('SELECT id, name, email, phone, role, referral_code, referred_by_user_id, created_at, updated_at FROM users WHERE id = ?').get(request.params.id);
+    const user = db.prepare(`
+      SELECT id, name, email, phone, role, referral_code, referred_by_user_id,
+             address_street, address_landmark, address_state, address_pincode,
+             created_at, updated_at
+      FROM users WHERE id = ?
+    `).get(request.params.id);
     if (!user) return reply.status(404).send({ message: 'User not found' });
 
     const orders = db.prepare(`
@@ -227,7 +232,55 @@ export default async function adminRoutes(fastify) {
         COALESCE((SELECT SUM(reward_amount) FROM referral_rewards WHERE referrer_user_id = ?), 0) as referral_earned
     `).get(user.id, user.id);
 
-    return { user, orders, services, referralSummary };
+    const currentPlan = db.prepare(`
+      SELECT
+        p.id,
+        p.name,
+        p.price,
+        p.currency,
+        up.status,
+        up.subscribed_at,
+        up.expires_at
+      FROM user_plans up
+      JOIN plans p ON p.id = up.plan_id
+      WHERE up.user_id = ? AND up.status = 'active'
+      ORDER BY up.subscribed_at DESC
+      LIMIT 1
+    `).get(user.id) || null;
+
+    // Fallback: if profile address is empty, use latest order address.
+    let address = {
+      street: user.address_street || null,
+      landmark: user.address_landmark || null,
+      state: user.address_state || null,
+      pincode: user.address_pincode || null,
+    };
+
+    if (!address.street && !address.landmark && !address.state && !address.pincode) {
+      const latestOrder = db.prepare(`
+        SELECT address
+        FROM orders
+        WHERE customer_id = ? AND address IS NOT NULL AND trim(address) <> ''
+        ORDER BY created_at DESC
+        LIMIT 1
+      `).get(user.id);
+
+      if (latestOrder?.address) {
+        try {
+          const parsed = JSON.parse(latestOrder.address);
+          address = {
+            street: parsed?.address_line || parsed?.street || null,
+            landmark: parsed?.landmark || null,
+            state: parsed?.state || null,
+            pincode: parsed?.pincode || null,
+          };
+        } catch {
+          // ignore malformed address JSON
+        }
+      }
+    }
+
+    return { user, orders, services, referralSummary, currentPlan, address };
   });
 
   // POST create user

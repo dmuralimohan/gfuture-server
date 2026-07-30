@@ -22,6 +22,24 @@ function sanitizeUser(user) {
   return safe;
 }
 
+function getCurrentPlanForUser(userId) {
+  return db.prepare(
+    `SELECT
+      p.id,
+      p.name,
+      p.price,
+      p.currency,
+      up.status,
+      up.subscribed_at,
+      up.expires_at
+     FROM user_plans up
+     JOIN plans p ON p.id = up.plan_id
+     WHERE up.user_id = ? AND up.status = 'active'
+     ORDER BY up.subscribed_at DESC
+     LIMIT 1`
+  ).get(userId) || null;
+}
+
 function referralSeed(value = '') {
   return String(value).toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4).padEnd(4, 'X');
 }
@@ -221,7 +239,8 @@ export default async function authRoutes(fastify) {
   fastify.get('/profile', { preHandler: [fastify.authenticate] }, async (request) => {
     const user = db.prepare('SELECT * FROM users WHERE id = ?').get(request.user.id);
     const providerProfile = db.prepare('SELECT * FROM provider_profiles WHERE user_id = ?').get(request.user.id) || null;
-    return { user: sanitizeUser(user), providerProfile };
+    const currentPlan = getCurrentPlanForUser(request.user.id);
+    return { user: sanitizeUser(user), providerProfile, currentPlan };
   });
 
   // GET /api/auth/referrals (protected)
@@ -275,11 +294,42 @@ export default async function authRoutes(fastify) {
 
   // PUT /api/auth/profile (protected)
   fastify.put('/profile', { preHandler: [fastify.authenticate] }, async (request) => {
-    const { name, phone, profile_picture, designation, experience_years, expertise, bio } = request.body;
+    const {
+      name,
+      phone,
+      profile_picture,
+      address_street,
+      address_landmark,
+      address_state,
+      address_pincode,
+      designation,
+      experience_years,
+      expertise,
+      bio,
+    } = request.body;
     const userId = request.user.id;
 
-    db.prepare(`UPDATE users SET name = COALESCE(?, name), phone = COALESCE(?, phone), profile_picture = COALESCE(?, profile_picture), updated_at = datetime('now') WHERE id = ?`)
-      .run(name || null, phone || null, profile_picture || null, userId);
+    db.prepare(`
+      UPDATE users SET
+        name = COALESCE(?, name),
+        phone = COALESCE(?, phone),
+        profile_picture = COALESCE(?, profile_picture),
+        address_street = COALESCE(?, address_street),
+        address_landmark = COALESCE(?, address_landmark),
+        address_state = COALESCE(?, address_state),
+        address_pincode = COALESCE(?, address_pincode),
+        updated_at = datetime('now')
+      WHERE id = ?
+    `).run(
+      name || null,
+      phone || null,
+      profile_picture || null,
+      address_street || null,
+      address_landmark || null,
+      address_state || null,
+      address_pincode || null,
+      userId,
+    );
 
     const currentUser = db.prepare('SELECT role FROM users WHERE id = ?').get(userId);
     if (currentUser?.role === 'provider') {
@@ -304,7 +354,8 @@ export default async function authRoutes(fastify) {
 
     const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
     const providerProfile = db.prepare('SELECT * FROM provider_profiles WHERE user_id = ?').get(userId) || null;
-    return { user: sanitizeUser(user), providerProfile };
+    const currentPlan = getCurrentPlanForUser(userId);
+    return { user: sanitizeUser(user), providerProfile, currentPlan };
   });
 
   // POST /api/auth/logout
