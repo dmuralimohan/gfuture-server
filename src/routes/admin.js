@@ -243,8 +243,8 @@ export default async function adminRoutes(fastify) {
         up.expires_at
       FROM user_plans up
       JOIN plans p ON p.id = up.plan_id
-      WHERE up.user_id = ? AND up.status = 'active'
-      ORDER BY up.subscribed_at DESC
+      WHERE up.user_id = ?
+      ORDER BY CASE WHEN up.status = 'active' THEN 0 ELSE 1 END, up.subscribed_at DESC
       LIMIT 1
     `).get(user.id) || null;
 
@@ -280,7 +280,12 @@ export default async function adminRoutes(fastify) {
       }
     }
 
-    return { user, orders, services, referralSummary, currentPlan, address };
+    const profile = {
+      address,
+      currentPlan,
+    };
+
+    return { user, orders, services, referralSummary, currentPlan, address, profile };
   });
 
   // POST create user
