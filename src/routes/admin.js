@@ -342,6 +342,9 @@ export default async function adminRoutes(fastify) {
     const user = db.prepare('SELECT * FROM users WHERE id = ?').get(request.params.id);
     if (!user) return reply.status(404).send({ message: 'User not found' });
     if (user.role === 'admin') return reply.status(400).send({ message: 'Cannot delete admin users' });
+    if (user.role !== 'customer') {
+      return reply.status(400).send({ message: 'Only customer users can be deleted from admin customers page' });
+    }
 
     const deleteUser = db.transaction((userId) => {
       // Referral links and rewards referencing this user
