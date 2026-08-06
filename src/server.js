@@ -24,7 +24,12 @@ import rideRoutes from './routes/rides.js';
 import { addConnection, removeConnection, updateRiderLocation, getConnection } from './ws.js';
 import db from './db.js';
 
-const app = Fastify({ logger: true });
+const app = Fastify({
+  logger: true,
+  routerOptions: {
+    ignoreTrailingSlash: true,
+  },
+});
 
 const uploadRoot = join(process.cwd(), 'uploads');
 if (!existsSync(uploadRoot)) {
