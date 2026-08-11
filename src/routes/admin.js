@@ -2,6 +2,10 @@ import db from '../db.js';
 import bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
 import crypto from 'crypto';
+import { createWriteStream, existsSync, mkdirSync, unlinkSync } from 'fs';
+import { join, extname } from 'path';
+import { Transform } from 'stream';
+import { pipeline } from 'stream/promises';
 
 function referralSeed(value = '') {
   return String(value).toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4).padEnd(4, 'X');
@@ -25,6 +29,103 @@ function requireAdmin(fastify) {
       return reply.status(403).send({ message: 'Admin access required' });
     }
   };
+}
+
+const SERVICE_UPLOAD_ROOT = join(process.cwd(), 'uploads', 'services');
+
+function ensureDir(dirPath) {
+  if (!existsSync(dirPath)) {
+    mkdirSync(dirPath, { recursive: true });
+  }
+}
+
+function toText(value) {
+  if (value == null) return null;
+  const text = String(value).trim();
+  return text.length ? text : null;
+}
+
+function toNumberOrNull(value) {
+  if (value === '' || value == null) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function toList(value) {
+  if (Array.isArray(value)) {
+    return value.map((v) => String(v).trim()).filter(Boolean);
+  }
+  if (value == null) return [];
+  const text = String(value).trim();
+  if (!text) return [];
+
+  if (text.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(text);
+      if (Array.isArray(parsed)) return parsed.map((v) => String(v).trim()).filter(Boolean);
+    } catch {
+      // fall back to comma split
+    }
+  }
+
+  return text.split(',').map((v) => v.trim()).filter(Boolean);
+}
+
+async function saveServiceImage(part) {
+  if (part.mimetype && !part.mimetype.startsWith('image/')) {
+    throw new Error('Uploaded file must be an image');
+  }
+
+  ensureDir(SERVICE_UPLOAD_ROOT);
+
+  const originalName = part.filename || `service-${Date.now()}`;
+  const fileExt = extname(originalName);
+  const fileName = `${Date.now()}-${uuidv4().slice(0, 8)}${fileExt}`;
+  const absolutePath = join(SERVICE_UPLOAD_ROOT, fileName);
+  const relativePath = `/uploads/services/${fileName}`;
+
+  const counter = new Transform({
+    transform(chunk, encoding, callback) {
+      callback(null, chunk);
+    },
+  });
+
+  await pipeline(part.file, counter, createWriteStream(absolutePath));
+  return relativePath;
+}
+
+function removeUploadedServiceImage(relativePath) {
+  if (!relativePath || !relativePath.startsWith('/uploads/services/')) return;
+  const absolutePath = join(process.cwd(), relativePath.replace(/^\//, ''));
+  if (!existsSync(absolutePath)) return;
+  try {
+    unlinkSync(absolutePath);
+  } catch {
+    // ignore cleanup errors
+  }
+}
+
+async function readServicePayload(request) {
+  if (!request.isMultipart()) {
+    return { ...(request.body || {}), uploadedImage: null };
+  }
+
+  const fields = {};
+  let uploadedImage = null;
+
+  for await (const part of request.parts()) {
+    if (part.type === 'file') {
+      if (part.fieldname === 'image_file' && part.filename) {
+        uploadedImage = await saveServiceImage(part);
+      } else {
+        part.file.resume();
+      }
+    } else {
+      fields[part.fieldname] = part.value;
+    }
+  }
+
+  return { ...fields, uploadedImage };
 }
 
 export default async function adminRoutes(fastify) {
@@ -444,36 +545,54 @@ export default async function adminRoutes(fastify) {
 
   // POST create service (admin)
   fastify.post('/services', { preHandler: [adminOnly] }, async (request, reply) => {
-    const { name, category_id, provider_id, price, description, duration, warranty, image, image_links, includes, type, size_value, size_unit, location } = request.body;
-    if (!name || !category_id || !price) {
+    let payload;
+    try {
+      payload = await readServicePayload(request);
+    } catch (error) {
+      return reply.status(400).send({ message: error.message || 'Invalid image upload' });
+    }
+
+    const name = toText(payload.name);
+    const categoryId = toNumberOrNull(payload.category_id);
+    const price = toNumberOrNull(payload.price);
+    if (!name || !categoryId || price == null) {
       return reply.status(400).send({ message: 'Name, category and price are required' });
     }
 
-    const serviceType = type || 'service';
-    const normalizedLocation = typeof location === 'string' ? location.trim() : '';
+    const serviceType = toText(payload.type) || 'service';
+    const normalizedLocation = typeof payload.location === 'string' ? payload.location.trim() : '';
     if (serviceType === 'product' && !normalizedLocation) {
       return reply.status(400).send({ message: 'Location is required when adding a product' });
     }
 
-    const imageLinksJson = Array.isArray(image_links) ? JSON.stringify(image_links.filter(Boolean)) : null;
+    const imageLinks = toList(payload.image_links);
+    const imageLinksJson = JSON.stringify(imageLinks);
+    const includes = toList(payload.includes);
+    const image = payload.uploadedImage || toText(payload.image);
+    const providerId = toText(payload.provider_id);
+    const description = toText(payload.description);
+    const duration = toText(payload.duration);
+    const warranty = toText(payload.warranty);
+    const sizeValue = toText(payload.size_value);
+    const sizeUnit = toText(payload.size_unit);
 
     const result = db.prepare(`
       INSERT INTO services (name, category_id, provider_id, price, description, duration, warranty, image, image_links, includes, type, size_value, size_unit, location)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       name,
-      category_id,
-      provider_id || null,
+      categoryId,
+      providerId,
       price,
       description,
       duration,
       warranty,
       image,
       imageLinksJson,
-      JSON.stringify(includes || []),
+      JSON.stringify(includes),
       serviceType,
-      size_value || null,
-      size_unit || null,
+      sizeValue,
+      sizeUnit,
       normalizedLocation || null,
     );
 
@@ -486,15 +605,39 @@ export default async function adminRoutes(fastify) {
     const service = db.prepare('SELECT * FROM services WHERE id = ?').get(request.params.id);
     if (!service) return reply.status(404).send({ message: 'Service not found' });
 
-    const { name, category_id, provider_id, price, description, duration, warranty, image, image_links, includes, active, type, size_value, size_unit, location } = request.body;
+    let payload;
+    try {
+      payload = await readServicePayload(request);
+    } catch (error) {
+      return reply.status(400).send({ message: error.message || 'Invalid image upload' });
+    }
+
+    const name = payload.name !== undefined ? toText(payload.name) : null;
+    const categoryId = payload.category_id !== undefined ? toNumberOrNull(payload.category_id) : null;
+    const providerId = payload.provider_id !== undefined ? toText(payload.provider_id) : null;
+    const price = payload.price !== undefined ? toNumberOrNull(payload.price) : null;
+    const description = payload.description !== undefined ? toText(payload.description) : null;
+    const duration = payload.duration !== undefined ? toText(payload.duration) : null;
+    const warranty = payload.warranty !== undefined ? toText(payload.warranty) : null;
+    const active = payload.active !== undefined ? (Number(payload.active) ? 1 : 0) : null;
+    const type = payload.type !== undefined ? toText(payload.type) : null;
+    const sizeValue = payload.size_value !== undefined ? toText(payload.size_value) : null;
+    const sizeUnit = payload.size_unit !== undefined ? toText(payload.size_unit) : null;
     const nextType = type || service.type;
-    const requestedLocation = typeof location === 'string' ? location.trim() : null;
+    const requestedLocation = typeof payload.location === 'string' ? payload.location.trim() : null;
     const effectiveLocation = requestedLocation !== null ? requestedLocation : (service.location || '');
     if (nextType === 'product' && !effectiveLocation) {
       return reply.status(400).send({ message: 'Location is required for products' });
     }
 
-    const imageLinksJson = Array.isArray(image_links) ? JSON.stringify(image_links.filter(Boolean)) : null;
+    const imageLinksJson = payload.image_links !== undefined ? JSON.stringify(toList(payload.image_links)) : null;
+    const includesJson = payload.includes !== undefined ? JSON.stringify(toList(payload.includes)) : null;
+    const image = payload.uploadedImage || (payload.image !== undefined ? toText(payload.image) : null);
+
+    if (payload.uploadedImage && service.image && service.image !== payload.uploadedImage) {
+      removeUploadedServiceImage(service.image);
+    }
+
     db.prepare(`
       UPDATE services SET
         name = COALESCE(?, name),
@@ -516,20 +659,20 @@ export default async function adminRoutes(fastify) {
       WHERE id = ?
     `).run(
       name,
-      category_id,
-      provider_id,
+      categoryId,
+      providerId,
       price,
       description,
       duration,
       warranty,
       image,
       imageLinksJson,
-      includes ? JSON.stringify(includes) : null,
+      includesJson,
       active,
       type,
-      size_value !== undefined ? size_value : null,
-      size_unit !== undefined ? size_unit : null,
-      location,
+      sizeValue,
+      sizeUnit,
+      requestedLocation,
       request.params.id,
     );
 
