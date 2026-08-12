@@ -186,6 +186,7 @@ db.exec(`
     price REAL NOT NULL DEFAULT 0,
     currency TEXT DEFAULT '₹',
     description TEXT,
+    image TEXT,
     target TEXT NOT NULL DEFAULT 'both',
     features TEXT,
     recommended INTEGER DEFAULT 0,
@@ -492,6 +493,7 @@ const migrations = [
   { table: 'courses', column: 'intro_video_name', type: 'TEXT' },
   { table: 'courses', column: 'intro_video_size', type: 'INTEGER DEFAULT 0' },
   { table: 'courses', column: 'intro_video_duration', type: 'INTEGER DEFAULT 0' },
+  { table: 'plans', column: 'image', type: 'TEXT' },
 ];
 
 for (const { table, column, type } of migrations) {

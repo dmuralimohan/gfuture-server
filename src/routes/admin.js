@@ -32,6 +32,7 @@ function requireAdmin(fastify) {
 }
 
 const SERVICE_UPLOAD_ROOT = join(process.cwd(), 'uploads', 'services');
+const PLAN_UPLOAD_ROOT = join(process.cwd(), 'uploads', 'plans');
 
 function ensureDir(dirPath) {
   if (!existsSync(dirPath)) {
@@ -49,6 +50,15 @@ function toNumberOrNull(value) {
   if (value === '' || value == null) return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
+}
+
+function toBoolOrNull(value) {
+  if (value === '' || value == null) return null;
+  if (typeof value === 'boolean') return value;
+  const normalized = String(value).trim().toLowerCase();
+  if (normalized === 'true' || normalized === '1') return true;
+  if (normalized === 'false' || normalized === '0') return false;
+  return null;
 }
 
 function toList(value) {
@@ -94,8 +104,42 @@ async function saveServiceImage(part) {
   return relativePath;
 }
 
+async function savePlanImage(part) {
+  if (part.mimetype && !part.mimetype.startsWith('image/')) {
+    throw new Error('Uploaded file must be an image');
+  }
+
+  ensureDir(PLAN_UPLOAD_ROOT);
+
+  const originalName = part.filename || `plan-${Date.now()}`;
+  const fileExt = extname(originalName);
+  const fileName = `${Date.now()}-${uuidv4().slice(0, 8)}${fileExt}`;
+  const absolutePath = join(PLAN_UPLOAD_ROOT, fileName);
+  const relativePath = `/uploads/plans/${fileName}`;
+
+  const counter = new Transform({
+    transform(chunk, encoding, callback) {
+      callback(null, chunk);
+    },
+  });
+
+  await pipeline(part.file, counter, createWriteStream(absolutePath));
+  return relativePath;
+}
+
 function removeUploadedServiceImage(relativePath) {
   if (!relativePath || !relativePath.startsWith('/uploads/services/')) return;
+  const absolutePath = join(process.cwd(), relativePath.replace(/^\//, ''));
+  if (!existsSync(absolutePath)) return;
+  try {
+    unlinkSync(absolutePath);
+  } catch {
+    // ignore cleanup errors
+  }
+}
+
+function removeUploadedPlanImage(relativePath) {
+  if (!relativePath || !relativePath.startsWith('/uploads/plans/')) return;
   const absolutePath = join(process.cwd(), relativePath.replace(/^\//, ''));
   if (!existsSync(absolutePath)) return;
   try {
@@ -126,6 +170,46 @@ async function readServicePayload(request) {
   }
 
   return { ...fields, uploadedImage };
+}
+
+async function readPlanPayload(request) {
+  if (!request.isMultipart()) {
+    return { ...(request.body || {}), uploadedImage: null };
+  }
+
+  const fields = {};
+  let uploadedImage = null;
+
+  for await (const part of request.parts()) {
+    if (part.type === 'file') {
+      if (part.fieldname === 'image_file' && part.filename) {
+        uploadedImage = await savePlanImage(part);
+      } else {
+        part.file.resume();
+      }
+    } else {
+      fields[part.fieldname] = part.value;
+    }
+  }
+
+  return { ...fields, uploadedImage };
+}
+
+function parsePlanFeatures(value) {
+  if (Array.isArray(value)) return value.map((v) => String(v).trim()).filter(Boolean);
+  const text = toText(value);
+  if (!text) return [];
+
+  if (text.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(text);
+      if (Array.isArray(parsed)) return parsed.map((v) => String(v).trim()).filter(Boolean);
+    } catch {
+      // fall back to newline split
+    }
+  }
+
+  return text.split('\n').map((v) => v.trim()).filter(Boolean);
 }
 
 export default async function adminRoutes(fastify) {
@@ -1102,16 +1186,44 @@ export default async function adminRoutes(fastify) {
 
   // POST create plan
   fastify.post('/plans', { preHandler: [adminOnly] }, async (request, reply) => {
-    const { name, price, description, target, features, recommended, cta, sort_order, active } = request.body;
-    if (!name || price === undefined) return reply.status(400).send({ message: 'Name and price are required' });
+    let payload;
+    try {
+      payload = await readPlanPayload(request);
+    } catch (error) {
+      return reply.status(400).send({ message: error.message || 'Invalid image upload' });
+    }
+
+    const name = toText(payload.name);
+    const price = toNumberOrNull(payload.price);
+    if (!name || price == null) return reply.status(400).send({ message: 'Name and price are required' });
+
+    const description = toText(payload.description);
+    const target = toText(payload.target) || 'both';
+    const features = parsePlanFeatures(payload.features);
+    const recommended = toBoolOrNull(payload.recommended);
+    const cta = toText(payload.cta) || 'Choose Plan';
+    const sortOrder = toNumberOrNull(payload.sort_order);
+    const active = toBoolOrNull(payload.active);
+    const image = payload.uploadedImage || toText(payload.image);
 
     // Default sort_order to max+1 so new plans appear at the end
     const maxSort = db.prepare('SELECT COALESCE(MAX(sort_order), 0) + 1 as next FROM plans').get().next;
 
     const result = db.prepare(`
-      INSERT INTO plans (name, price, description, target, features, recommended, cta, sort_order, active)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(name, price, description, target || 'both', JSON.stringify(features || []), recommended ? 1 : 0, cta || 'Choose Plan', sort_order || maxSort, active !== undefined ? (active ? 1 : 0) : 1);
+      INSERT INTO plans (name, price, description, image, target, features, recommended, cta, sort_order, active)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      name,
+      price,
+      description,
+      image,
+      target,
+      JSON.stringify(features),
+      recommended ? 1 : 0,
+      cta,
+      sortOrder || maxSort,
+      active === null ? 1 : (active ? 1 : 0),
+    );
 
     const plan = db.prepare('SELECT * FROM plans WHERE id = ?').get(result.lastInsertRowid);
     plan.features = plan.features ? JSON.parse(plan.features) : [];
@@ -1123,13 +1235,34 @@ export default async function adminRoutes(fastify) {
     const plan = db.prepare('SELECT * FROM plans WHERE id = ?').get(request.params.id);
     if (!plan) return reply.status(404).send({ message: 'Plan not found' });
 
-    const { name, price, description, target, features, recommended, cta, sort_order, active } = request.body;
+    let payload;
+    try {
+      payload = await readPlanPayload(request);
+    } catch (error) {
+      return reply.status(400).send({ message: error.message || 'Invalid image upload' });
+    }
+
+    const name = payload.name !== undefined ? toText(payload.name) : null;
+    const price = payload.price !== undefined ? toNumberOrNull(payload.price) : null;
+    const description = payload.description !== undefined ? toText(payload.description) : null;
+    const image = payload.uploadedImage || (payload.image !== undefined ? toText(payload.image) : null);
+    const target = payload.target !== undefined ? toText(payload.target) : null;
+    const features = payload.features !== undefined ? JSON.stringify(parsePlanFeatures(payload.features)) : null;
+    const recommended = payload.recommended !== undefined ? toBoolOrNull(payload.recommended) : null;
+    const cta = payload.cta !== undefined ? toText(payload.cta) : null;
+    const sortOrder = payload.sort_order !== undefined ? toNumberOrNull(payload.sort_order) : null;
+    const active = payload.active !== undefined ? toBoolOrNull(payload.active) : null;
+
+    if (payload.uploadedImage && plan.image && plan.image !== payload.uploadedImage) {
+      removeUploadedPlanImage(plan.image);
+    }
 
     db.prepare(`
       UPDATE plans SET
         name = COALESCE(?, name),
         price = COALESCE(?, price),
         description = COALESCE(?, description),
+        image = COALESCE(?, image),
         target = COALESCE(?, target),
         features = COALESCE(?, features),
         recommended = COALESCE(?, recommended),
@@ -1138,7 +1271,19 @@ export default async function adminRoutes(fastify) {
         active = COALESCE(?, active),
         updated_at = datetime('now')
       WHERE id = ?
-    `).run(name, price, description, target, features ? JSON.stringify(features) : null, recommended !== undefined ? (recommended ? 1 : 0) : null, cta, sort_order, active !== undefined ? (active ? 1 : 0) : null, request.params.id);
+    `).run(
+      name,
+      price,
+      description,
+      image,
+      target,
+      features,
+      recommended === null ? null : (recommended ? 1 : 0),
+      cta,
+      sortOrder,
+      active === null ? null : (active ? 1 : 0),
+      request.params.id,
+    );
 
     const updated = db.prepare('SELECT * FROM plans WHERE id = ?').get(request.params.id);
     updated.features = updated.features ? JSON.parse(updated.features) : [];
