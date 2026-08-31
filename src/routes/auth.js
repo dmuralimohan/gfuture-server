@@ -280,14 +280,23 @@ export default async function authRoutes(fastify) {
        ORDER BY u.created_at DESC`
     ).all(request.user.id);
 
-    const currentPlanName = currentPlan?.name || null;
+    const normalizePlanName = (value) => {
+      if (value == null) return null;
+      const text = String(value).trim();
+      if (!text) return null;
+      if (text.toLowerCase() === 'starter scheme') return null;
+      return text;
+    };
+
+    const currentPlanName = normalizePlanName(currentPlan?.name);
 
     return {
       total: referrals.length,
       current_plan_name: currentPlanName,
       referrals: referrals.map((referral) => ({
         ...referral,
-        plan: referral.active_plan_name || null,
+        active_plan_name: normalizePlanName(referral.active_plan_name),
+        plan: normalizePlanName(referral.active_plan_name),
       })),
     };
   });
