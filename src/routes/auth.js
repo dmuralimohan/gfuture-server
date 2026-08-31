@@ -287,7 +287,7 @@ export default async function authRoutes(fastify) {
       current_plan_name: currentPlanName,
       referrals: referrals.map((referral) => ({
         ...referral,
-        plan: referral.active_plan_name || currentPlanName,
+        plan: referral.active_plan_name || null,
       })),
     };
   });
