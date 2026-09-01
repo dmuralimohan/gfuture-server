@@ -283,12 +283,10 @@ export default async function authRoutes(fastify) {
     const normalizePlanName = (value) => {
       if (value == null) return null;
       const text = String(value).trim();
-      if (!text) return null;
-      if (text.toLowerCase() === 'starter scheme') return null;
-      return text;
+      return text || null;
     };
 
-    const currentPlanName = normalizePlanName(currentPlan?.name);
+    const currentPlanName = normalizePlanName(currentPlan?.name) || 'Starter scheme';
 
     return {
       total: referrals.length,
@@ -296,7 +294,7 @@ export default async function authRoutes(fastify) {
       referrals: referrals.map((referral) => ({
         ...referral,
         active_plan_name: normalizePlanName(referral.active_plan_name),
-        plan: normalizePlanName(referral.active_plan_name),
+        plan: normalizePlanName(referral.active_plan_name) || currentPlanName || 'Starter scheme',
       })),
     };
   });
