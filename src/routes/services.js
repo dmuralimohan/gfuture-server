@@ -1,4 +1,98 @@
 import db from '../db.js';
+import { createWriteStream, existsSync, mkdirSync, unlinkSync } from 'fs';
+import { join, extname } from 'path';
+import { Transform } from 'stream';
+import { pipeline } from 'stream/promises';
+import { v4 as uuidv4 } from 'uuid';
+
+const SERVICE_UPLOAD_ROOT = join(process.cwd(), 'uploads', 'services');
+
+function ensureDir(dirPath) {
+  if (!existsSync(dirPath)) {
+    mkdirSync(dirPath, { recursive: true });
+  }
+}
+
+function toText(value) {
+  if (value == null) return null;
+  const text = String(value).trim();
+  return text.length ? text : null;
+}
+
+function toList(value) {
+  if (Array.isArray(value)) {
+    return value.map((v) => String(v).trim()).filter(Boolean);
+  }
+  if (value == null) return [];
+  const text = String(value).trim();
+  if (!text) return [];
+  if (text.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(text);
+      if (Array.isArray(parsed)) return parsed.map((v) => String(v).trim()).filter(Boolean);
+    } catch {
+      // ignore and fall through
+    }
+  }
+  return text.split(',').map((v) => v.trim()).filter(Boolean);
+}
+
+async function saveServiceImage(part) {
+  if (part.mimetype && !part.mimetype.startsWith('image/')) {
+    throw new Error('Uploaded file must be an image');
+  }
+
+  ensureDir(SERVICE_UPLOAD_ROOT);
+
+  const originalName = part.filename || `service-${Date.now()}`;
+  const fileExt = extname(originalName);
+  const fileName = `${Date.now()}-${uuidv4().slice(0, 8)}${fileExt}`;
+  const absolutePath = join(SERVICE_UPLOAD_ROOT, fileName);
+  const relativePath = `/uploads/services/${fileName}`;
+
+  const counter = new Transform({
+    transform(chunk, encoding, callback) {
+      callback(null, chunk);
+    },
+  });
+
+  await pipeline(part.file, counter, createWriteStream(absolutePath));
+  return relativePath;
+}
+
+function removeUploadedServiceImage(relativePath) {
+  if (!relativePath || !relativePath.startsWith('/uploads/services/')) return;
+  const absolutePath = join(process.cwd(), relativePath.replace(/^\//, ''));
+  if (!existsSync(absolutePath)) return;
+  try {
+    unlinkSync(absolutePath);
+  } catch {
+    // ignore cleanup errors
+  }
+}
+
+async function readServicePayload(request) {
+  if (!request.isMultipart()) {
+    return { ...(request.body || {}), uploadedImage: null };
+  }
+
+  const fields = {};
+  let uploadedImage = null;
+
+  for await (const part of request.parts()) {
+    if (part.type === 'file') {
+      if (part.fieldname === 'image_file' && part.filename) {
+        uploadedImage = await saveServiceImage(part);
+      } else {
+        part.file.resume();
+      }
+    } else {
+      fields[part.fieldname] = part.value;
+    }
+  }
+
+  return { ...fields, uploadedImage };
+}
 
 export default async function serviceRoutes(fastify) {
   const parseServiceRecord = (service) => ({
@@ -184,6 +278,11 @@ export default async function serviceRoutes(fastify) {
       return reply.status(403).send({ message: 'Only providers can create services' });
     }
 
+    let payload = request.body || {};
+    if (request.isMultipart()) {
+      payload = await readServicePayload(request);
+    }
+
     const {
       name,
       category_id,
@@ -198,34 +297,42 @@ export default async function serviceRoutes(fastify) {
       size_value,
       size_unit,
       location,
-    } = request.body;
+    } = payload;
 
-    const serviceType = type || 'service';
+    const serviceType = toText(type) || 'service';
     const normalizedLocation = typeof location === 'string' ? location.trim() : '';
 
     if (serviceType === 'product' && !normalizedLocation) {
       return reply.status(400).send({ message: 'Location is required when adding a product' });
     }
 
-    const imageLinksJson = Array.isArray(image_links) ? JSON.stringify(image_links.filter(Boolean)) : null;
+    const imageLinksJson = JSON.stringify(toList(image_links));
+    const includesJson = JSON.stringify(toList(includes));
+    const finalImage = payload.uploadedImage || toText(image);
+    const providerId = request.user.id;
+    const categoryId = Number(category_id);
+
+    if (!name || !categoryId || price == null) {
+      return reply.status(400).send({ message: 'Name, category and price are required' });
+    }
 
     const result = db.prepare(`
       INSERT INTO services (name, category_id, provider_id, price, description, duration, warranty, image, image_links, includes, type, size_value, size_unit, location)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
-      name,
-      category_id,
-      request.user.id,
-      price,
-      description,
-      duration,
-      warranty,
-      image,
+      String(name).trim(),
+      categoryId,
+      providerId,
+      Number(price),
+      toText(description),
+      toText(duration),
+      toText(warranty),
+      finalImage,
       imageLinksJson,
-      JSON.stringify(includes || []),
+      includesJson,
       serviceType,
-      size_value || null,
-      size_unit || null,
+      toText(size_value),
+      toText(size_unit),
       normalizedLocation || null,
     );
 
@@ -255,8 +362,29 @@ export default async function serviceRoutes(fastify) {
       return reply.status(403).send({ message: 'Not authorized' });
     }
 
-    const { name, price, description, duration, warranty, image, image_links, includes, active, type, size_value, size_unit, location } = request.body;
-    const nextType = type || service.type;
+    let payload = request.body || {};
+    if (request.isMultipart()) {
+      payload = await readServicePayload(request);
+    }
+
+    const {
+      name,
+      category_id,
+      price,
+      description,
+      duration,
+      warranty,
+      image,
+      image_links,
+      includes,
+      active,
+      type,
+      size_value,
+      size_unit,
+      location,
+    } = payload;
+
+    const nextType = toText(type) || service.type;
     const requestedLocation = typeof location === 'string' ? location.trim() : null;
     const effectiveLocation = requestedLocation !== null ? requestedLocation : (service.location || '');
 
@@ -271,11 +399,19 @@ export default async function serviceRoutes(fastify) {
       }
     }
 
-    const imageLinksJson = Array.isArray(image_links) ? JSON.stringify(image_links.filter(Boolean)) : null;
+    const imageLinksJson = image_links !== undefined ? JSON.stringify(toList(image_links)) : null;
+    const includesJson = includes !== undefined ? JSON.stringify(toList(includes)) : null;
+    const finalImage = payload.uploadedImage || (image !== undefined ? toText(image) : null);
+    const nextCategoryId = category_id !== undefined ? Number(category_id) : null;
+
+    if (payload.uploadedImage && service.image && service.image !== payload.uploadedImage) {
+      removeUploadedServiceImage(service.image);
+    }
 
     db.prepare(`
       UPDATE services SET
         name = COALESCE(?, name),
+        category_id = COALESCE(?, category_id),
         price = COALESCE(?, price),
         description = COALESCE(?, description),
         duration = COALESCE(?, duration),
@@ -287,21 +423,24 @@ export default async function serviceRoutes(fastify) {
         type = COALESCE(?, type),
         size_value = COALESCE(?, size_value),
         size_unit = COALESCE(?, size_unit),
+        location = COALESCE(?, location),
         updated_at = datetime('now')
       WHERE id = ?
     `).run(
-      name,
-      price,
-      description,
-      duration,
-      warranty,
-      image,
+      toText(name),
+      nextCategoryId,
+      price == null ? null : Number(price),
+      toText(description),
+      toText(duration),
+      toText(warranty),
+      finalImage,
       imageLinksJson,
-      includes ? JSON.stringify(includes) : null,
-      active,
-      type,
-      size_value,
-      size_unit,
+      includesJson,
+      active == null ? null : Number(active),
+      toText(type),
+      toText(size_value),
+      toText(size_unit),
+      requestedLocation,
       request.params.id,
     );
 
