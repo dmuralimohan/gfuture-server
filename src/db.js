@@ -9,6 +9,14 @@ const db = new Database(join(__dirname, '..', 'gfuture.db'));
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
+const userColumns = db.prepare('PRAGMA table_info(users)').all();
+if (!userColumns.some((column) => column.name === 'is_approved')) {
+  db.exec('ALTER TABLE users ADD COLUMN is_approved INTEGER NOT NULL DEFAULT 1');
+}
+if (!userColumns.some((column) => column.name === 'approval_status')) {
+  db.exec("ALTER TABLE users ADD COLUMN approval_status TEXT NOT NULL DEFAULT 'approved'");
+}
+
 // Create tables
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
@@ -18,6 +26,8 @@ db.exec(`
     phone TEXT NOT NULL,
     password TEXT NOT NULL,
     role TEXT NOT NULL DEFAULT 'customer',
+    is_approved INTEGER NOT NULL DEFAULT 1,
+    approval_status TEXT NOT NULL DEFAULT 'approved',
     profile_picture TEXT,
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))

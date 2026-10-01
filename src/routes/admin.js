@@ -354,7 +354,7 @@ export default async function adminRoutes(fastify) {
 
     const total = db.prepare(`SELECT COUNT(*) as count FROM users ${where}`).get(...params).count;
     const users = db.prepare(`
-      SELECT id, name, email, phone, role, referral_code, created_at, updated_at
+      SELECT id, name, email, phone, role, referral_code, is_approved, approval_status, created_at, updated_at
       FROM users ${where}
       ORDER BY created_at DESC
       LIMIT ? OFFSET ?
@@ -514,12 +514,31 @@ export default async function adminRoutes(fastify) {
         phone = COALESCE(?, phone),
         role = COALESCE(?, role),
         password = COALESCE(?, password),
+        is_approved = CASE WHEN role = 'provider' AND ? IS NOT NULL THEN 1 ELSE is_approved END,
+        approval_status = CASE WHEN role = 'provider' AND ? IS NOT NULL THEN 'approved' ELSE approval_status END,
         updated_at = datetime('now')
       WHERE id = ?
-    `).run(name, email, phone, role, hashedPassword, request.params.id);
+    `).run(name, email, phone, role, hashedPassword, role, role, request.params.id);
 
-    const updated = db.prepare('SELECT id, name, email, phone, role, created_at, updated_at FROM users WHERE id = ?').get(request.params.id);
+    const updated = db.prepare('SELECT id, name, email, phone, role, is_approved, approval_status, created_at, updated_at FROM users WHERE id = ?').get(request.params.id);
     return { user: updated };
+  });
+
+  fastify.patch('/users/:id/approve', { preHandler: [adminOnly] }, async (request, reply) => {
+    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(request.params.id);
+    if (!user) return reply.status(404).send({ message: 'User not found' });
+    if (user.role !== 'provider') return reply.status(400).send({ message: 'Only provider accounts can be approved' });
+
+    db.prepare(`
+      UPDATE users
+      SET is_approved = 1,
+          approval_status = 'approved',
+          updated_at = datetime('now')
+      WHERE id = ?
+    `).run(request.params.id);
+
+    const updated = db.prepare('SELECT id, name, email, phone, role, is_approved, approval_status FROM users WHERE id = ?').get(request.params.id);
+    return { user: updated, message: 'Provider approved successfully' };
   });
 
   // DELETE user
@@ -527,9 +546,6 @@ export default async function adminRoutes(fastify) {
     const user = db.prepare('SELECT * FROM users WHERE id = ?').get(request.params.id);
     if (!user) return reply.status(404).send({ message: 'User not found' });
     if (user.role === 'admin') return reply.status(400).send({ message: 'Cannot delete admin users' });
-    if (user.role !== 'customer') {
-      return reply.status(400).send({ message: 'Only customer users can be deleted from admin customers page' });
-    }
 
     const deleteUser = db.transaction((userId) => {
       // Referral links and rewards referencing this user

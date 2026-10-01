@@ -121,11 +121,13 @@ export default async function authRoutes(fastify) {
     const hashedPassword = await bcrypt.hash(password, 12);
     const userId = uuidv4();
     const generatedReferralCode = generateUniqueReferralCode(name || normalizedEmail);
+    const isApproved = userRole === 'provider' ? 0 : 1;
+    const approvalStatus = userRole === 'provider' ? 'pending' : 'approved';
 
     db.prepare(
       `INSERT INTO users
-       (id, name, email, phone, password, role, referral_code, referred_by_user_id, is_email_verified)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`
+       (id, name, email, phone, password, role, referral_code, referred_by_user_id, is_email_verified, is_approved, approval_status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`
     ).run(
       userId,
       name,
@@ -135,6 +137,8 @@ export default async function authRoutes(fastify) {
       userRole,
       generatedReferralCode,
       referrer?.id || null,
+      isApproved,
+      approvalStatus,
     );
 
     // Consume OTP proof so each verification can only be used once for signup.
@@ -154,8 +158,16 @@ export default async function authRoutes(fastify) {
     }
 
     const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
-    // Initialize wallet with welcome bonus
     ensureWallet(userId);
+
+    if (userRole === 'provider') {
+      return reply.status(202).send({
+        user: sanitizeUser(user),
+        message: 'Provider registration submitted for admin approval.',
+        pendingApproval: true,
+      });
+    }
+
     const accessToken = fastify.jwt.sign({ id: user.id, email: user.email, role: user.role });
     const refreshToken = generateRefreshToken();
     saveRefreshToken(userId, refreshToken);
@@ -187,6 +199,10 @@ export default async function authRoutes(fastify) {
     const validPassword = await bcrypt.compare(password, user.password);
     if (!validPassword) {
       return reply.status(401).send({ message: 'Invalid email or password' });
+    }
+
+    if (user.role === 'provider' && Number(user.is_approved) !== 1) {
+      return reply.status(403).send({ message: 'Provider account is pending admin approval.' });
     }
 
     const accessToken = fastify.jwt.sign({ id: user.id, email: user.email, role: user.role });
