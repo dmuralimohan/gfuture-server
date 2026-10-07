@@ -568,6 +568,10 @@ for (const user of usersWithoutReferral) {
   db.prepare('UPDATE users SET referral_code = ? WHERE id = ?').run(referralCode, user.id);
 }
 
+// Ensure core categories exist for new marketplace flows.
+db.prepare("INSERT OR IGNORE INTO categories (name, icon) VALUES (?, ?)")
+  .run('Meat', 'Restaurant');
+
 // Backfill location for existing products without location.
 db.prepare(
   "UPDATE services SET location = 'Kadalur' WHERE type = 'product' AND (location IS NULL OR trim(location) = '')"

@@ -5,6 +5,24 @@ import { sendMeetingLinkSMS } from '../sms.js';
 
 const PLATFORM_FEE_RATE = 0; // 0% default fallback
 
+function createNotification(userId, type, title, body, payload = {}) {
+  db.prepare(`
+    INSERT INTO notifications (user_id, type, title, body, payload, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+  `).run(userId, type, title, body, JSON.stringify(payload));
+  sendToUser(userId, type, payload);
+}
+
+function isMeatCategory(serviceOrCategoryId) {
+  const categoryId = typeof serviceOrCategoryId === 'number'
+    ? serviceOrCategoryId
+    : Number(serviceOrCategoryId?.category_id ?? serviceOrCategoryId?.categoryId ?? 0);
+
+  if (!categoryId) return false;
+  const category = db.prepare('SELECT name FROM categories WHERE id = ?').get(categoryId);
+  return !!category && category.name?.toLowerCase() === 'meat';
+}
+
 function getPlatformFeeRate() {
   try {
     const row = db.prepare("SELECT value FROM settings WHERE key = 'platform_fee_rate'").get();
@@ -118,6 +136,37 @@ export default async function orderRoutes(fastify) {
       insertItem.run(orderId, vi.service.id, vi.quantity, vi.service.price);
     }
 
+    const meatVendorIds = new Set();
+    for (const service of validItems.map(item => item.service)) {
+      if (!isMeatCategory(service)) continue;
+      const providers = db.prepare(`
+        SELECT DISTINCT s.provider_id, u.name as provider_name
+        FROM services s
+        LEFT JOIN users u ON u.id = s.provider_id
+        WHERE s.category_id = ? AND s.provider_id IS NOT NULL AND s.active = 1
+      `).all(service.category_id);
+
+      for (const provider of providers) {
+        if (provider.provider_id && provider.provider_id !== customerId) {
+          meatVendorIds.add(provider.provider_id);
+          createNotification(
+            provider.provider_id,
+            'MEAT_ORDER_REQUEST',
+            'New meat order request',
+            `${request.user.name || 'A customer'} placed a meat order and needs pickup.`,
+            {
+              orderId,
+              customerId,
+              providerId: provider.provider_id,
+              requestedBy: request.user.id,
+              serviceId: service.id,
+              category: 'meat',
+            }
+          );
+        }
+      }
+    }
+
     const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
     const orderItems = db.prepare(`
       SELECT oi.*, s.name as service_name
@@ -127,7 +176,7 @@ export default async function orderRoutes(fastify) {
     `).all(orderId);
 
     return reply.status(201).send({
-      order: { ...order, address: JSON.parse(order.address || '{}'), items: orderItems },
+      order: { ...order, address: JSON.parse(order.address || '{}'), items: orderItems, meatVendorIds: [...meatVendorIds] },
     });
   });
 
@@ -208,7 +257,7 @@ export default async function orderRoutes(fastify) {
   // PATCH /api/orders/:id/status — update order status (provider/admin)
   fastify.patch('/:id/status', { preHandler: [fastify.authenticate] }, async (request, reply) => {
     const { status } = request.body;
-    const validStatuses = ['pending', 'confirmed', 'in-progress', 'completed', 'cancelled'];
+    const validStatuses = ['pending', 'confirmed', 'picked_up', 'in-progress', 'completed', 'cancelled'];
 
     if (!validStatuses.includes(status)) {
       return reply.status(400).send({ message: `Invalid status. Must be one of: ${validStatuses.join(', ')}` });
@@ -216,6 +265,52 @@ export default async function orderRoutes(fastify) {
 
     const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(request.params.id);
     if (!order) return reply.status(404).send({ message: 'Order not found' });
+
+    if (request.user.role === 'provider') {
+      const providerItems = db.prepare(`
+        SELECT DISTINCT s.provider_id
+        FROM order_items oi
+        JOIN services s ON oi.service_id = s.id
+        WHERE oi.order_id = ?
+      `).all(request.params.id);
+
+      const canManage = providerItems.some((item) => item.provider_id === request.user.id);
+      if (!canManage) {
+        return reply.status(403).send({ message: 'Not authorized to update this order' });
+      }
+
+      if (status === 'picked_up') {
+        const currentOrder = db.prepare('SELECT * FROM orders WHERE id = ?').get(request.params.id);
+        const providerId = request.user.id;
+        const vendorName = db.prepare('SELECT name FROM users WHERE id = ?').get(providerId)?.name || 'Vendor';
+
+        db.prepare(`UPDATE orders SET provider_id = ?, status = ?, updated_at = datetime('now') WHERE id = ?`)
+          .run(providerId, 'picked_up', request.params.id);
+
+        db.prepare(`
+          DELETE FROM notifications
+          WHERE type = 'MEAT_ORDER_REQUEST'
+            AND payload LIKE ?
+            AND user_id != ?
+        `).run(`%"orderId":"${request.params.id}"%`, providerId);
+
+        createNotification(
+          currentOrder.customer_id,
+          'MEAT_ORDER_PICKED_UP',
+          'Your meat order was picked up',
+          `Your order was picked up by ${vendorName}.`,
+          {
+            orderId: request.params.id,
+            providerId,
+            providerName: vendorName,
+            status: 'picked_up',
+          }
+        );
+
+        const updated = db.prepare('SELECT * FROM orders WHERE id = ?').get(request.params.id);
+        return { order: updated };
+      }
+    }
 
     db.prepare(`UPDATE orders SET status = ?, updated_at = datetime('now') WHERE id = ?`)
       .run(status, request.params.id);

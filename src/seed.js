@@ -15,6 +15,7 @@ const cats = [
   { name: 'AC Service & Repair', icon: 'AcUnit' },
   { name: 'Painting & Renovation', icon: 'FormatPaint' },
   { name: 'Pest Control', icon: 'BugReport' },
+  { name: 'Meat', icon: 'Restaurant' },
 ];
 
 const insertCat = db.prepare('INSERT OR IGNORE INTO categories (id, name, icon) VALUES (?, ?, ?)');
