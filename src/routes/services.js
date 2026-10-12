@@ -145,9 +145,10 @@ export default async function serviceRoutes(fastify) {
 
     const countRow = db.prepare(`SELECT COUNT(*) as total FROM services s ${where}`).get(...params);
     const services = db.prepare(`
-      SELECT s.*, c.name as category_name
+      SELECT s.*, c.name as category_name, u.name as provider_name
       FROM services s
       LEFT JOIN categories c ON s.category_id = c.id
+      LEFT JOIN users u ON s.provider_id = u.id
       ${where}
       ${orderBy}
       LIMIT ? OFFSET ?

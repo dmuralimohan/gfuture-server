@@ -19,6 +19,8 @@ function isMeatCategory(serviceOrCategoryId) {
     : Number(serviceOrCategoryId?.category_id ?? serviceOrCategoryId?.categoryId ?? 0);
 
   if (!categoryId) return false;
+  if (categoryId === 9) return true;
+
   const category = db.prepare('SELECT name FROM categories WHERE id = ?').get(categoryId);
   return !!category && category.name?.toLowerCase() === 'meat';
 }
@@ -52,6 +54,35 @@ function getExtraFees() {
   } catch {
     return [];
   }
+}
+
+function resolveMeatPickupOrder(orderId, providerId, providerName) {
+  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
+  if (!order) return null;
+
+  db.prepare(`UPDATE orders SET provider_id = ?, status = ?, updated_at = datetime('now') WHERE id = ?`)
+    .run(providerId, 'picked_up', orderId);
+
+  db.prepare(`
+    DELETE FROM notifications
+    WHERE type = 'MEAT_ORDER_REQUEST'
+      AND payload LIKE ?
+  `).run(`%"orderId":"${orderId}"%`);
+
+  createNotification(
+    order.customer_id,
+    'MEAT_ORDER_PICKED_UP',
+    'Your meat order was picked up',
+    `Your order was picked up by ${providerName}.`,
+    {
+      orderId,
+      providerId,
+      providerName,
+      status: 'picked_up',
+    }
+  );
+
+  return db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
 }
 
 export default async function orderRoutes(fastify) {
@@ -254,6 +285,35 @@ export default async function orderRoutes(fastify) {
     return { order: { ...order, address: JSON.parse(order.address || '{}'), items, meeting: meeting || null } };
   });
 
+  // POST /api/orders/:id/accept — provider accepts meat pickup request
+  fastify.post('/:id/accept', { preHandler: [fastify.authenticate] }, async (request, reply) => {
+    if (request.user.role !== 'provider') {
+      return reply.status(403).send({ message: 'Only providers can accept meat pickup requests' });
+    }
+
+    const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(request.params.id);
+    if (!order) return reply.status(404).send({ message: 'Order not found' });
+
+    const isOrderProvider = db.prepare(`
+      SELECT DISTINCT s.provider_id
+      FROM order_items oi
+      JOIN services s ON oi.service_id = s.id
+      WHERE oi.order_id = ? AND s.provider_id = ?
+    `).get(order.id, request.user.id);
+
+    if (!isOrderProvider) {
+      return reply.status(403).send({ message: 'This provider is not assigned to the order' });
+    }
+
+    if (order.status === 'picked_up') {
+      return { order, message: 'Order already picked up by another provider' };
+    }
+
+    const providerName = db.prepare('SELECT name FROM users WHERE id = ?').get(request.user.id)?.name || 'Vendor';
+    const updated = resolveMeatPickupOrder(order.id, request.user.id, providerName);
+    return { message: 'Meat order accepted', order: updated };
+  });
+
   // PATCH /api/orders/:id/status — update order status (provider/admin)
   fastify.patch('/:id/status', { preHandler: [fastify.authenticate] }, async (request, reply) => {
     const { status } = request.body;
@@ -280,34 +340,9 @@ export default async function orderRoutes(fastify) {
       }
 
       if (status === 'picked_up') {
-        const currentOrder = db.prepare('SELECT * FROM orders WHERE id = ?').get(request.params.id);
         const providerId = request.user.id;
         const vendorName = db.prepare('SELECT name FROM users WHERE id = ?').get(providerId)?.name || 'Vendor';
-
-        db.prepare(`UPDATE orders SET provider_id = ?, status = ?, updated_at = datetime('now') WHERE id = ?`)
-          .run(providerId, 'picked_up', request.params.id);
-
-        db.prepare(`
-          DELETE FROM notifications
-          WHERE type = 'MEAT_ORDER_REQUEST'
-            AND payload LIKE ?
-            AND user_id != ?
-        `).run(`%"orderId":"${request.params.id}"%`, providerId);
-
-        createNotification(
-          currentOrder.customer_id,
-          'MEAT_ORDER_PICKED_UP',
-          'Your meat order was picked up',
-          `Your order was picked up by ${vendorName}.`,
-          {
-            orderId: request.params.id,
-            providerId,
-            providerName: vendorName,
-            status: 'picked_up',
-          }
-        );
-
-        const updated = db.prepare('SELECT * FROM orders WHERE id = ?').get(request.params.id);
+        const updated = resolveMeatPickupOrder(request.params.id, providerId, vendorName);
         return { order: updated };
       }
     }
