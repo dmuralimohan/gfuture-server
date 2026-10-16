@@ -1,21 +1,48 @@
 import Database from 'better-sqlite3';
+import { existsSync, statSync } from 'fs';
 import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
+import { dirname, isAbsolute, join, resolve } from 'path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const db = new Database(join(__dirname, '..', 'gfuture.db'));
+
+/**
+ * DB SAFETY RULES
+ * - Never DROP / truncate / replace the database file.
+ * - Never recreate tables that already exist.
+ * - Only ADD missing columns / tables / indexes.
+ * - Refuse to create a brand-new empty DB unless ALLOW_NEW_DB=true.
+ *
+ * EC2 example:
+ *   DB_PATH=/home/ec2-user/file/gfuture-server/gfuture.db
+ */
+const defaultDbPath = join(__dirname, '..', 'gfuture.db');
+const configuredDbPath = process.env.DB_PATH
+  ? (isAbsolute(process.env.DB_PATH) ? process.env.DB_PATH : resolve(process.cwd(), process.env.DB_PATH))
+  : defaultDbPath;
+const dbPath = resolve(configuredDbPath);
+const allowNewDb = String(process.env.ALLOW_NEW_DB || '').toLowerCase() === 'true';
+const dbExistedBeforeOpen = existsSync(dbPath);
+const dbSizeBeforeOpen = dbExistedBeforeOpen ? statSync(dbPath).size : 0;
+
+console.log(`[DB] Using database file: ${dbPath}`);
+console.log(`[DB] File existed before open: ${dbExistedBeforeOpen} (size=${dbSizeBeforeOpen} bytes)`);
+
+if (!dbExistedBeforeOpen) {
+  if (!allowNewDb) {
+    console.error('[DB] FATAL: Database file does not exist.');
+    console.error(`[DB] Expected file: ${dbPath}`);
+    console.error('[DB] Refusing to create a new empty database (this protects existing production data).');
+    console.error('[DB] Fix: set DB_PATH to your real gfuture.db, or set ALLOW_NEW_DB=true only for intentional fresh setups.');
+    throw new Error(`Database file missing at ${dbPath}. Set DB_PATH or ALLOW_NEW_DB=true.`);
+  }
+  console.warn('[DB] ALLOW_NEW_DB=true — creating a NEW empty database at this path.');
+}
+
+const db = new Database(dbPath);
 
 // Enable WAL mode for better performance
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
-
-const userColumns = db.prepare('PRAGMA table_info(users)').all();
-if (!userColumns.some((column) => column.name === 'is_approved')) {
-  db.exec('ALTER TABLE users ADD COLUMN is_approved INTEGER NOT NULL DEFAULT 1');
-}
-if (!userColumns.some((column) => column.name === 'approval_status')) {
-  db.exec("ALTER TABLE users ADD COLUMN approval_status TEXT NOT NULL DEFAULT 'approved'");
-}
 
 // Create tables
 db.exec(`
@@ -477,20 +504,28 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, read_at, created_at);
 `);
 
-// Migrations: add columns that may be missing in older databases
+// Migrations: ADD missing columns only. Never DROP / rename / rewrite tables.
+// IMPORTANT: run only after CREATE TABLE IF NOT EXISTS above.
+// Prefer nullable + DEFAULT for ALTER safety on older SQLite / existing rows.
 const migrations = [
+  { table: 'users', column: 'is_approved', type: 'INTEGER DEFAULT 1' },
+  { table: 'users', column: 'approval_status', type: "TEXT DEFAULT 'approved'" },
   { table: 'users', column: 'profile_picture', type: 'TEXT' },
   { table: 'users', column: 'referral_code', type: 'TEXT' },
   { table: 'users', column: 'referred_by_user_id', type: 'TEXT' },
   { table: 'users', column: 'referral_rewarded_at', type: 'TEXT' },
-  { table: 'users', column: 'is_email_verified', type: 'INTEGER NOT NULL DEFAULT 1' },
+  { table: 'users', column: 'is_email_verified', type: 'INTEGER DEFAULT 1' },
   { table: 'users', column: 'address_street', type: 'TEXT' },
   { table: 'users', column: 'address_landmark', type: 'TEXT' },
   { table: 'users', column: 'address_state', type: 'TEXT' },
   { table: 'users', column: 'address_pincode', type: 'TEXT' },
+  { table: 'users', column: 'default_address', type: 'TEXT' },
+  { table: 'users', column: 'address_name', type: 'TEXT' },
+  { table: 'users', column: 'address_phone', type: 'TEXT' },
+  { table: 'users', column: 'address_detail', type: 'TEXT' },
   { table: 'orders', column: 'discount_amount', type: 'REAL DEFAULT 0' },
   { table: 'orders', column: 'coupon_code', type: 'TEXT' },
-  { table: 'services', column: 'type', type: "TEXT NOT NULL DEFAULT 'service'" },
+  { table: 'services', column: 'type', type: "TEXT DEFAULT 'service'" },
   { table: 'services', column: 'size_value', type: 'TEXT' },
   { table: 'services', column: 'size_unit', type: 'TEXT' },
   { table: 'services', column: 'image_links', type: 'TEXT' },
@@ -507,37 +542,48 @@ const migrations = [
 ];
 
 for (const { table, column, type } of migrations) {
-  const columns = db.prepare(`PRAGMA table_info(${table})`).all();
-  if (!columns.some(c => c.name === column)) {
+  try {
+    const columns = db.prepare(`PRAGMA table_info(${table})`).all();
+    // Skip if table is missing (PRAGMA returns [] for unknown tables).
+    if (!columns.length) continue;
+    if (columns.some((c) => c.name === column)) continue;
     db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+    console.log(`[DB] Added column ${table}.${column}`);
+  } catch (err) {
+    // Never wipe/retry destructively — log and continue so existing DB keeps working.
+    console.warn(`[DB] Skipped adding ${table}.${column}: ${err.message}`);
   }
 }
 
-db.exec(`
-  CREATE UNIQUE INDEX IF NOT EXISTS idx_users_referral_code_unique
-  ON users(referral_code)
-  WHERE referral_code IS NOT NULL;
+try {
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_users_referral_code_unique
+    ON users(referral_code)
+    WHERE referral_code IS NOT NULL;
 
-  CREATE INDEX IF NOT EXISTS idx_users_referred_by
-  ON users(referred_by_user_id);
+    CREATE INDEX IF NOT EXISTS idx_users_referred_by
+    ON users(referred_by_user_id);
 
-  CREATE TABLE IF NOT EXISTS referral_rewards (
-    id TEXT PRIMARY KEY,
-    referrer_user_id TEXT NOT NULL,
-    referred_user_id TEXT NOT NULL,
-    plan_id INTEGER,
-    plan_amount REAL NOT NULL DEFAULT 0,
-    reward_amount REAL NOT NULL DEFAULT 0,
-    created_at TEXT DEFAULT (datetime('now')),
-    FOREIGN KEY (referrer_user_id) REFERENCES users(id),
-    FOREIGN KEY (referred_user_id) REFERENCES users(id),
-    FOREIGN KEY (plan_id) REFERENCES plans(id),
-    UNIQUE(referred_user_id)
-  );
+    CREATE TABLE IF NOT EXISTS referral_rewards (
+      id TEXT PRIMARY KEY,
+      referrer_user_id TEXT NOT NULL,
+      referred_user_id TEXT NOT NULL,
+      plan_id INTEGER,
+      plan_amount REAL NOT NULL DEFAULT 0,
+      reward_amount REAL NOT NULL DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (referrer_user_id) REFERENCES users(id),
+      FOREIGN KEY (referred_user_id) REFERENCES users(id),
+      FOREIGN KEY (plan_id) REFERENCES plans(id),
+      UNIQUE(referred_user_id)
+    );
 
-  CREATE INDEX IF NOT EXISTS idx_referral_rewards_referrer
-  ON referral_rewards(referrer_user_id, created_at DESC);
-`);
+    CREATE INDEX IF NOT EXISTS idx_referral_rewards_referrer
+    ON referral_rewards(referrer_user_id, created_at DESC);
+  `);
+} catch (err) {
+  console.warn('[DB] Referral schema/index setup skipped:', err.message);
+}
 
 function referralToken(input = '') {
   const cleaned = String(input).toUpperCase().replace(/[^A-Z0-9]/g, '');
@@ -558,24 +604,36 @@ function generateUniqueReferralCode(seed = 'GFUT') {
   return `${referralToken(seed)}${Date.now().toString(36).toUpperCase().slice(-6)}`;
 }
 
-const usersWithoutReferral = db
-  .prepare("SELECT id, name, email FROM users WHERE referral_code IS NULL OR trim(referral_code) = ''")
-  .all();
+try {
+  const usersWithoutReferral = db
+    .prepare("SELECT id, name, email FROM users WHERE referral_code IS NULL OR trim(referral_code) = ''")
+    .all();
 
-for (const user of usersWithoutReferral) {
-  const seed = user.name || user.email || 'GFUT';
-  const referralCode = generateUniqueReferralCode(seed);
-  db.prepare('UPDATE users SET referral_code = ? WHERE id = ?').run(referralCode, user.id);
+  for (const user of usersWithoutReferral) {
+    const seed = user.name || user.email || 'GFUT';
+    const referralCode = generateUniqueReferralCode(seed);
+    db.prepare('UPDATE users SET referral_code = ? WHERE id = ?').run(referralCode, user.id);
+  }
+} catch (err) {
+  console.warn('[DB] Referral backfill skipped:', err.message);
 }
 
-// Ensure core categories exist for new marketplace flows.
-db.prepare("INSERT OR IGNORE INTO categories (name, icon) VALUES (?, ?)")
-  .run('Meat', 'Restaurant');
+// Ensure core categories exist for new marketplace flows (additive only).
+try {
+  db.prepare("INSERT OR IGNORE INTO categories (name, icon) VALUES (?, ?)")
+    .run('Meat', 'Restaurant');
+} catch (err) {
+  console.warn('[DB] Meat category seed skipped:', err.message);
+}
 
-// Backfill location for existing products without location.
-db.prepare(
-  "UPDATE services SET location = 'Kadalur' WHERE type = 'product' AND (location IS NULL OR trim(location) = '')"
-).run();
+// Backfill location for existing products without location (non-destructive).
+try {
+  db.prepare(
+    "UPDATE services SET location = 'Kadalur' WHERE type = 'product' AND (location IS NULL OR trim(location) = '')"
+  ).run();
+} catch (err) {
+  console.warn('[DB] Product location backfill skipped:', err.message);
+}
 
 // Course Meetings — one meeting link per course service, shared with all purchasers
 db.exec(`
@@ -606,6 +664,20 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_password_resets_phone ON password_resets(phone, expires_at);
 `);
+
+try {
+  const userCount = db.prepare('SELECT COUNT(*) AS count FROM users').get()?.count ?? 0;
+  const orderCount = db.prepare('SELECT COUNT(*) AS count FROM orders').get()?.count ?? 0;
+  console.log(`[DB] Ready. users=${userCount}, orders=${orderCount}`);
+  if (dbExistedBeforeOpen && userCount === 0 && dbSizeBeforeOpen < 4096) {
+    console.warn('[DB] WARNING: Opened an existing but nearly-empty DB file. Confirm DB_PATH points to your production gfuture.db.');
+  }
+  if (!dbExistedBeforeOpen) {
+    console.warn('[DB] WARNING: Started with a brand-new empty database. Existing data is NOT here.');
+  }
+} catch (err) {
+  console.warn('[DB] Could not verify row counts:', err.message);
+}
 
 export default db;
 

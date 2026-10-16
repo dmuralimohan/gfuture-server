@@ -17,9 +17,82 @@ function saveRefreshToken(userId, token) {
   db.prepare('INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES (?, ?, ?)').run(userId, token, expiresAt);
 }
 
+function parseDefaultAddress(user) {
+  if (!user) return null;
+
+  if (user.default_address) {
+    try {
+      const parsed = typeof user.default_address === 'string'
+        ? JSON.parse(user.default_address)
+        : user.default_address;
+      if (parsed && typeof parsed === 'object') return parsed;
+    } catch {
+      // fall through to legacy columns
+    }
+  }
+
+  if (user.address_street || user.address_pincode || user.address_state || user.address_detail) {
+    return {
+      name: user.address_name || user.name || '',
+      phone: user.address_phone || user.phone || '',
+      street: user.address_street || '',
+      landmark: user.address_landmark || '',
+      detail: user.address_detail || '',
+      state: user.address_state || '',
+      pincode: user.address_pincode || '',
+    };
+  }
+
+  return null;
+}
+
+function normalizeAddressPayload(body = {}) {
+  return {
+    name: String(body.name || '').trim(),
+    phone: String(body.phone || '').trim(),
+    street: String(body.street || '').trim(),
+    landmark: String(body.landmark || '').trim(),
+    detail: String(body.detail || '').trim(),
+    state: String(body.state || '').trim(),
+    pincode: String(body.pincode || '').trim(),
+  };
+}
+
+function saveDefaultAddress(userId, address) {
+  const normalized = normalizeAddressPayload(address);
+  db.prepare(`
+    UPDATE users SET
+      default_address = ?,
+      address_name = ?,
+      address_phone = ?,
+      address_street = ?,
+      address_landmark = ?,
+      address_detail = ?,
+      address_state = ?,
+      address_pincode = ?,
+      updated_at = datetime('now')
+    WHERE id = ?
+  `).run(
+    JSON.stringify(normalized),
+    normalized.name || null,
+    normalized.phone || null,
+    normalized.street || null,
+    normalized.landmark || null,
+    normalized.detail || null,
+    normalized.state || null,
+    normalized.pincode || null,
+    userId,
+  );
+  return normalized;
+}
+
 function sanitizeUser(user) {
-  const { password, ...safe } = user;
-  return safe;
+  if (!user) return null;
+  const { password, default_address, ...safe } = user;
+  return {
+    ...safe,
+    default_address: parseDefaultAddress(user),
+  };
 }
 
 function getCurrentPlanForUser(userId) {
@@ -257,6 +330,40 @@ export default async function authRoutes(fastify) {
     const providerProfile = db.prepare('SELECT * FROM provider_profiles WHERE user_id = ?').get(request.user.id) || null;
     const currentPlan = getCurrentPlanForUser(request.user.id);
     return { user: sanitizeUser(user), providerProfile, currentPlan };
+  });
+
+  // GET /api/auth/address — fetch saved default delivery address
+  fastify.get('/address', { preHandler: [fastify.authenticate] }, async (request) => {
+    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(request.user.id);
+    if (!user) return { address: null };
+    return { address: parseDefaultAddress(user) };
+  });
+
+  // PUT /api/auth/address — save default delivery address
+  fastify.put('/address', { preHandler: [fastify.authenticate] }, async (request, reply) => {
+    const address = normalizeAddressPayload(request.body || {});
+
+    if (!address.name) {
+      return reply.status(400).send({ message: 'Full name is required' });
+    }
+    if (!/^\d{10}$/.test(address.phone)) {
+      return reply.status(400).send({ message: 'Enter a valid 10-digit phone number' });
+    }
+    if (!address.street) {
+      return reply.status(400).send({ message: 'Address line is required' });
+    }
+    if (!address.detail) {
+      return reply.status(400).send({ message: 'City / Area is required' });
+    }
+    if (!address.state) {
+      return reply.status(400).send({ message: 'State is required' });
+    }
+    if (!/^\d{6}$/.test(address.pincode)) {
+      return reply.status(400).send({ message: 'Enter a valid 6-digit pincode' });
+    }
+
+    const saved = saveDefaultAddress(request.user.id, address);
+    return { message: 'Default address saved', address: saved };
   });
 
   // GET /api/auth/referrals (protected)
