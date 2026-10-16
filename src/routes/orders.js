@@ -25,6 +25,108 @@ function isMeatCategory(serviceOrCategoryId) {
   return !!category && category.name?.toLowerCase() === 'meat';
 }
 
+function orderHasMeatItems(orderId) {
+  const row = db.prepare(`
+    SELECT 1
+    FROM order_items oi
+    JOIN services s ON oi.service_id = s.id
+    LEFT JOIN categories c ON c.id = s.category_id
+    WHERE oi.order_id = ?
+      AND (s.category_id = 9 OR lower(c.name) = 'meat')
+    LIMIT 1
+  `).get(orderId);
+  return !!row;
+}
+
+function isMeatVendor(providerId) {
+  if (!providerId) return false;
+  const row = db.prepare(`
+    SELECT 1
+    FROM services s
+    LEFT JOIN categories c ON c.id = s.category_id
+    WHERE s.provider_id = ?
+      AND s.active = 1
+      AND (s.category_id = 9 OR lower(c.name) = 'meat')
+    LIMIT 1
+  `).get(providerId);
+  return !!row;
+}
+
+function isOrderItemProvider(orderId, providerId) {
+  return !!db.prepare(`
+    SELECT 1
+    FROM order_items oi
+    JOIN services s ON oi.service_id = s.id
+    WHERE oi.order_id = ? AND s.provider_id = ?
+    LIMIT 1
+  `).get(orderId, providerId);
+}
+
+function canViewOrder(order, user) {
+  if (!order || !user) return false;
+  if (user.role === 'admin') return true;
+  if (order.customer_id === user.id) return true;
+  if (order.provider_id === user.id) return true;
+  if (isOrderItemProvider(order.id, user.id)) return true;
+  // Nearby meat vendors can view open meat pickup requests.
+  if (
+    user.role === 'provider'
+    && isMeatVendor(user.id)
+    && orderHasMeatItems(order.id)
+    && ['pending', 'confirmed'].includes(order.status)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function getVendorInfo(providerId) {
+  if (!providerId) return null;
+  const user = db.prepare('SELECT id, name, phone, email FROM users WHERE id = ?').get(providerId);
+  if (!user) return null;
+  return {
+    id: user.id,
+    name: user.name || 'Vendor',
+    phone: user.phone || null,
+    email: user.email || null,
+  };
+}
+
+function getOrderItems(orderId) {
+  return db.prepare(`
+    SELECT oi.*, s.name as service_name, s.image, s.description, s.category_id,
+           c.name as category_name, s.provider_id as item_provider_id
+    FROM order_items oi
+    LEFT JOIN services s ON oi.service_id = s.id
+    LEFT JOIN categories c ON c.id = s.category_id
+    WHERE oi.order_id = ?
+  `).all(orderId);
+}
+
+function enrichOrder(order) {
+  if (!order) return null;
+  const vendor = getVendorInfo(order.provider_id);
+  const meeting = db.prepare(
+    'SELECT * FROM meeting_requests WHERE order_id = ? ORDER BY id DESC LIMIT 1'
+  ).get(order.id);
+  let address = {};
+  try {
+    address = typeof order.address === 'string' ? JSON.parse(order.address || '{}') : (order.address || {});
+  } catch {
+    address = {};
+  }
+  return {
+    ...order,
+    address,
+    items: getOrderItems(order.id),
+    meeting: meeting || null,
+    is_meat_order: orderHasMeatItems(order.id),
+    provider_name: vendor?.name || null,
+    provider_phone: vendor?.phone || null,
+    vendor,
+  };
+}
+
 function getPlatformFeeRate() {
   try {
     const row = db.prepare("SELECT value FROM settings WHERE key = 'platform_fee_rate'").get();
@@ -58,10 +160,35 @@ function getExtraFees() {
 
 function resolveMeatPickupOrder(orderId, providerId, providerName) {
   const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
-  if (!order) return null;
+  if (!order) return { ok: false, code: 404, message: 'Order not found' };
 
-  db.prepare(`UPDATE orders SET provider_id = ?, status = ?, updated_at = datetime('now') WHERE id = ?`)
-    .run(providerId, 'picked_up', orderId);
+  if (['picked_up', 'in-progress', 'delivered', 'completed', 'cancelled'].includes(order.status)) {
+    return {
+      ok: false,
+      code: 409,
+      message: 'Order already picked up by another provider',
+      order: enrichOrder(order),
+    };
+  }
+
+  // First vendor to accept wins.
+  const result = db.prepare(`
+    UPDATE orders
+    SET provider_id = ?, status = 'picked_up', updated_at = datetime('now')
+    WHERE id = ?
+      AND status IN ('pending', 'confirmed')
+      AND (provider_id IS NULL OR provider_id = '')
+  `).run(providerId, orderId);
+
+  if (result.changes === 0) {
+    const latest = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
+    return {
+      ok: false,
+      code: 409,
+      message: 'Order already picked up by another provider',
+      order: enrichOrder(latest),
+    };
+  }
 
   db.prepare(`
     DELETE FROM notifications
@@ -69,6 +196,7 @@ function resolveMeatPickupOrder(orderId, providerId, providerName) {
       AND payload LIKE ?
   `).run(`%"orderId":"${orderId}"%`);
 
+  const vendor = getVendorInfo(providerId);
   createNotification(
     order.customer_id,
     'MEAT_ORDER_PICKED_UP',
@@ -78,11 +206,55 @@ function resolveMeatPickupOrder(orderId, providerId, providerName) {
       orderId,
       providerId,
       providerName,
+      providerPhone: vendor?.phone || null,
       status: 'picked_up',
+      vendor,
     }
   );
 
-  return db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
+  return { ok: true, order: enrichOrder(db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId)) };
+}
+
+function markOrderDelivered(orderId, providerId, providerName) {
+  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
+  if (!order) return { ok: false, code: 404, message: 'Order not found' };
+
+  if (order.provider_id !== providerId) {
+    return { ok: false, code: 403, message: 'Only the assigned vendor can mark this order delivered' };
+  }
+
+  if (!['picked_up', 'in-progress', 'confirmed'].includes(order.status)) {
+    return {
+      ok: false,
+      code: 400,
+      message: `Cannot deliver order in status "${order.status}"`,
+      order: enrichOrder(order),
+    };
+  }
+
+  db.prepare(`
+    UPDATE orders
+    SET status = 'delivered', updated_at = datetime('now')
+    WHERE id = ?
+  `).run(orderId);
+
+  const vendor = getVendorInfo(providerId);
+  createNotification(
+    order.customer_id,
+    'MEAT_ORDER_DELIVERED',
+    'Your meat order was delivered',
+    `${providerName} marked your order as delivered.`,
+    {
+      orderId,
+      providerId,
+      providerName,
+      providerPhone: vendor?.phone || null,
+      status: 'delivered',
+      vendor,
+    }
+  );
+
+  return { ok: true, order: enrichOrder(db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId)) };
 }
 
 export default async function orderRoutes(fastify) {
@@ -198,16 +370,9 @@ export default async function orderRoutes(fastify) {
       }
     }
 
-    const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
-    const orderItems = db.prepare(`
-      SELECT oi.*, s.name as service_name
-      FROM order_items oi
-      LEFT JOIN services s ON oi.service_id = s.id
-      WHERE oi.order_id = ?
-    `).all(orderId);
-
+    const order = enrichOrder(db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId));
     return reply.status(201).send({
-      order: { ...order, address: JSON.parse(order.address || '{}'), items: orderItems, meatVendorIds: [...meatVendorIds] },
+      order: { ...order, meatVendorIds: [...meatVendorIds] },
     });
   });
 
@@ -220,39 +385,34 @@ export default async function orderRoutes(fastify) {
     if (role === 'admin') {
       orders = db.prepare('SELECT * FROM orders ORDER BY created_at DESC').all();
     } else if (role === 'provider') {
-      // Show orders that contain services by this provider
+      // Own service orders + claimed meat pickups + open meat requests for meat vendors
       orders = db.prepare(`
         SELECT DISTINCT o.*
         FROM orders o
-        JOIN order_items oi ON o.id = oi.order_id
-        JOIN services s ON oi.service_id = s.id
+        LEFT JOIN order_items oi ON o.id = oi.order_id
+        LEFT JOIN services s ON oi.service_id = s.id
+        LEFT JOIN categories c ON c.id = s.category_id
         WHERE s.provider_id = ?
+           OR o.provider_id = ?
+           OR (
+             o.status IN ('pending', 'confirmed')
+             AND (s.category_id = 9 OR lower(c.name) = 'meat')
+             AND EXISTS (
+               SELECT 1
+               FROM services s2
+               LEFT JOIN categories c2 ON c2.id = s2.category_id
+               WHERE s2.provider_id = ?
+                 AND s2.active = 1
+                 AND (s2.category_id = 9 OR lower(c2.name) = 'meat')
+             )
+           )
         ORDER BY o.created_at DESC
-      `).all(userId);
+      `).all(userId, userId, userId);
     } else {
       orders = db.prepare('SELECT * FROM orders WHERE customer_id = ? ORDER BY created_at DESC').all(userId);
     }
 
-    // Attach items to each order
-    const getItems = db.prepare(`
-      SELECT oi.*, s.name as service_name, s.image, s.description
-      FROM order_items oi
-      LEFT JOIN services s ON oi.service_id = s.id
-      WHERE oi.order_id = ?
-    `);
-
-    const getMeeting = db.prepare(
-      'SELECT * FROM meeting_requests WHERE order_id = ? ORDER BY id DESC LIMIT 1'
-    );
-
-    const enriched = orders.map((o) => ({
-      ...o,
-      address: o.address ? JSON.parse(o.address) : {},
-      items: getItems.all(o.id),
-      meeting: getMeeting.get(o.id) || null,
-    }));
-
-    return { orders: enriched };
+    return { orders: orders.map(enrichOrder) };
   });
 
   // GET /api/orders/:id — single order
@@ -260,32 +420,14 @@ export default async function orderRoutes(fastify) {
     const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(request.params.id);
     if (!order) return reply.status(404).send({ message: 'Order not found' });
 
-    // Check authorization
-    const isProvider = db.prepare(`
-      SELECT 1 FROM order_items oi
-      JOIN services s ON oi.service_id = s.id
-      WHERE oi.order_id = ? AND s.provider_id = ?
-    `).get(order.id, request.user.id);
-
-    if (order.customer_id !== request.user.id && !isProvider && request.user.role !== 'admin') {
+    if (!canViewOrder(order, request.user)) {
       return reply.status(403).send({ message: 'Not authorized' });
     }
 
-    const items = db.prepare(`
-      SELECT oi.*, s.name as service_name, s.image, s.description
-      FROM order_items oi
-      LEFT JOIN services s ON oi.service_id = s.id
-      WHERE oi.order_id = ?
-    `).all(order.id);
-
-    const meeting = db.prepare(
-      'SELECT * FROM meeting_requests WHERE order_id = ? ORDER BY id DESC LIMIT 1'
-    ).get(order.id);
-
-    return { order: { ...order, address: JSON.parse(order.address || '{}'), items, meeting: meeting || null } };
+    return { order: enrichOrder(order) };
   });
 
-  // POST /api/orders/:id/accept — provider accepts meat pickup request
+  // POST /api/orders/:id/accept — any meat vendor can accept open meat pickup request
   fastify.post('/:id/accept', { preHandler: [fastify.authenticate] }, async (request, reply) => {
     if (request.user.role !== 'provider') {
       return reply.status(403).send({ message: 'Only providers can accept meat pickup requests' });
@@ -294,30 +436,55 @@ export default async function orderRoutes(fastify) {
     const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(request.params.id);
     if (!order) return reply.status(404).send({ message: 'Order not found' });
 
-    const isOrderProvider = db.prepare(`
-      SELECT DISTINCT s.provider_id
-      FROM order_items oi
-      JOIN services s ON oi.service_id = s.id
-      WHERE oi.order_id = ? AND s.provider_id = ?
-    `).get(order.id, request.user.id);
-
-    if (!isOrderProvider) {
-      return reply.status(403).send({ message: 'This provider is not assigned to the order' });
+    if (!orderHasMeatItems(order.id)) {
+      return reply.status(400).send({ message: 'This order is not a meat pickup request' });
     }
 
-    if (order.status === 'picked_up') {
-      return { order, message: 'Order already picked up by another provider' };
+    const eligible =
+      isMeatVendor(request.user.id) || isOrderItemProvider(order.id, request.user.id);
+    if (!eligible) {
+      return reply.status(403).send({ message: 'Only meat vendors can accept this order' });
     }
 
     const providerName = db.prepare('SELECT name FROM users WHERE id = ?').get(request.user.id)?.name || 'Vendor';
-    const updated = resolveMeatPickupOrder(order.id, request.user.id, providerName);
-    return { message: 'Meat order accepted', order: updated };
+    const result = resolveMeatPickupOrder(order.id, request.user.id, providerName);
+    if (!result.ok) {
+      return reply.status(result.code).send({ message: result.message, order: result.order || null });
+    }
+
+    return { message: 'Meat order accepted', order: result.order };
+  });
+
+  // POST /api/orders/:id/complete — assigned vendor marks meat order delivered
+  fastify.post('/:id/complete', { preHandler: [fastify.authenticate] }, async (request, reply) => {
+    if (request.user.role !== 'provider' && request.user.role !== 'admin') {
+      return reply.status(403).send({ message: 'Only vendors can complete delivery' });
+    }
+
+    const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(request.params.id);
+    if (!order) return reply.status(404).send({ message: 'Order not found' });
+
+    const providerId = request.user.role === 'admin' && order.provider_id
+      ? order.provider_id
+      : request.user.id;
+    const providerName = db.prepare('SELECT name FROM users WHERE id = ?').get(providerId)?.name || 'Vendor';
+
+    if (request.user.role === 'admin' && !order.provider_id) {
+      return reply.status(400).send({ message: 'Order has no assigned vendor yet' });
+    }
+
+    const result = markOrderDelivered(order.id, providerId, providerName);
+    if (!result.ok) {
+      return reply.status(result.code).send({ message: result.message, order: result.order || null });
+    }
+
+    return { message: 'Order marked as delivered', order: result.order };
   });
 
   // PATCH /api/orders/:id/status — update order status (provider/admin)
   fastify.patch('/:id/status', { preHandler: [fastify.authenticate] }, async (request, reply) => {
     const { status } = request.body;
-    const validStatuses = ['pending', 'confirmed', 'picked_up', 'in-progress', 'completed', 'cancelled'];
+    const validStatuses = ['pending', 'confirmed', 'picked_up', 'in-progress', 'delivered', 'completed', 'cancelled'];
 
     if (!validStatuses.includes(status)) {
       return reply.status(400).send({ message: `Invalid status. Must be one of: ${validStatuses.join(', ')}` });
@@ -327,14 +494,11 @@ export default async function orderRoutes(fastify) {
     if (!order) return reply.status(404).send({ message: 'Order not found' });
 
     if (request.user.role === 'provider') {
-      const providerItems = db.prepare(`
-        SELECT DISTINCT s.provider_id
-        FROM order_items oi
-        JOIN services s ON oi.service_id = s.id
-        WHERE oi.order_id = ?
-      `).all(request.params.id);
+      const canManage =
+        order.provider_id === request.user.id
+        || isOrderItemProvider(request.params.id, request.user.id)
+        || (status === 'picked_up' && isMeatVendor(request.user.id) && orderHasMeatItems(order.id));
 
-      const canManage = providerItems.some((item) => item.provider_id === request.user.id);
       if (!canManage) {
         return reply.status(403).send({ message: 'Not authorized to update this order' });
       }
@@ -342,8 +506,20 @@ export default async function orderRoutes(fastify) {
       if (status === 'picked_up') {
         const providerId = request.user.id;
         const vendorName = db.prepare('SELECT name FROM users WHERE id = ?').get(providerId)?.name || 'Vendor';
-        const updated = resolveMeatPickupOrder(request.params.id, providerId, vendorName);
-        return { order: updated };
+        const result = resolveMeatPickupOrder(request.params.id, providerId, vendorName);
+        if (!result.ok) {
+          return reply.status(result.code).send({ message: result.message, order: result.order || null });
+        }
+        return { order: result.order };
+      }
+
+      if (status === 'delivered' || status === 'completed') {
+        const vendorName = db.prepare('SELECT name FROM users WHERE id = ?').get(request.user.id)?.name || 'Vendor';
+        const result = markOrderDelivered(request.params.id, request.user.id, vendorName);
+        if (!result.ok) {
+          return reply.status(result.code).send({ message: result.message, order: result.order || null });
+        }
+        return { order: result.order };
       }
     }
 
@@ -351,7 +527,7 @@ export default async function orderRoutes(fastify) {
       .run(status, request.params.id);
 
     const updated = db.prepare('SELECT * FROM orders WHERE id = ?').get(request.params.id);
-    return { order: updated };
+    return { order: enrichOrder(updated) };
   });
 
   // ─── Meeting-link flow ──────────────────────────────────────
@@ -455,19 +631,11 @@ export default async function orderRoutes(fastify) {
   // GET /api/orders/:id/meeting — get meeting info for an order
   fastify.get('/:id/meeting', { preHandler: [fastify.authenticate] }, async (request, reply) => {
     const orderId = request.params.id;
-    const userId = request.user.id;
 
     const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
     if (!order) return reply.status(404).send({ message: 'Order not found' });
 
-    // Allow customer, provider, or admin
-    const isProvider = db.prepare(`
-      SELECT 1 FROM order_items oi
-      JOIN services s ON oi.service_id = s.id
-      WHERE oi.order_id = ? AND s.provider_id = ?
-    `).get(orderId, userId);
-
-    if (order.customer_id !== userId && !isProvider && request.user.role !== 'admin') {
+    if (!canViewOrder(order, request.user)) {
       return reply.status(403).send({ message: 'Not authorized' });
     }
 
